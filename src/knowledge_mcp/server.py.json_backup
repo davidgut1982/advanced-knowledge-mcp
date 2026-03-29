@@ -1,0 +1,1034 @@
+#!/usr/bin/env python3
+"""
+Knowledge MCP Server
+
+Unified knowledge management system for:
+- Knowledge Base (structured documents)
+- Knowledge Graph (concepts and relations)
+- Research (notes, sources, experiments)
+- Journal (decision log and config snapshots)
+
+Spec: LATVIAN_LAB_MCP_MASTER_SPEC_v1.2 § 4.1
+"""
+
+import os
+import sys
+import json
+import logging
+from pathlib import Path
+from typing import Any, List, Dict, Optional
+from datetime import datetime
+import uuid
+
+import sentry_sdk
+import yaml
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp import types
+
+# Add shared utilities to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent / "shared"))
+from response import ResponseEnvelope, ErrorCodes
+
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Initialize Sentry
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        traces_sample_rate=1.0,
+        environment=os.getenv("SENTRY_ENVIRONMENT", "development"),
+        release=os.getenv("SENTRY_RELEASE", "latvian-lab@1.0.0"),
+    )
+    logger.info("Sentry monitoring enabled")
+
+# Initialize MCP server
+app = Server("knowledge-mcp")
+
+# Configuration
+KNOWLEDGE_DATA_DIR = Path(os.getenv("KNOWLEDGE_DATA_DIR", "/srv/latvian_mcp/data/knowledge"))
+KB_DIR = KNOWLEDGE_DATA_DIR / "kb"
+KG_DIR = KNOWLEDGE_DATA_DIR / "kg"
+RESEARCH_DIR = KNOWLEDGE_DATA_DIR / "research"
+JOURNAL_DIR = KNOWLEDGE_DATA_DIR / "journal"
+
+# Ensure directories exist
+for dir_path in [KB_DIR, KG_DIR, RESEARCH_DIR, JOURNAL_DIR]:
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+# Initialize storage files
+(KG_DIR / "nodes.json").touch()
+(KG_DIR / "edges.json").touch()
+(RESEARCH_DIR / "sources.json").touch()
+(RESEARCH_DIR / "experiments.json").touch()
+
+
+def load_json(path: Path, default=None):
+    """Load JSON file, return default if empty or missing."""
+    if not path.exists() or path.stat().st_size == 0:
+        return default if default is not None else []
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return default if default is not None else []
+
+
+def save_json(path: Path, data):
+    """Save data to JSON file."""
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def format_response(response: dict) -> list[types.TextContent]:
+    """Format response as MCP TextContent."""
+    return [types.TextContent(type="text", text=json.dumps(response))]
+
+
+# =============================================================================
+# Tool Registration
+# =============================================================================
+
+@app.list_tools()
+async def list_tools() -> list[types.Tool]:
+    """List all available tools."""
+    return [
+        # Knowledge Base Tools
+        types.Tool(
+            name="kb_add",
+            description="Add a knowledge base entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic (xtts, grammar, infrastructure, research)"},
+                    "title": {"type": "string", "description": "Entry title"},
+                    "content": {"type": "string", "description": "Entry content"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"}
+                },
+                "required": ["topic", "title", "content"]
+            }
+        ),
+        types.Tool(
+            name="kb_search",
+            description="Search knowledge base",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                },
+                "required": ["query"]
+            }
+        ),
+        types.Tool(
+            name="kb_get",
+            description="Get full KB entry by ID",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "KB entry ID"}
+                },
+                "required": ["kb_id"]
+            }
+        ),
+        types.Tool(
+            name="kb_list",
+            description="List KB entries",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                }
+            }
+        ),
+
+        # Knowledge Graph Tools
+        types.Tool(
+            name="kg_add_node",
+            description="Add a concept node to knowledge graph",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "Node label"},
+                    "kind": {"type": "string", "description": "Node kind/type"},
+                    "properties": {"type": "object", "description": "Node properties"}
+                },
+                "required": ["label", "kind"]
+            }
+        ),
+        types.Tool(
+            name="kg_add_edge",
+            description="Link two nodes in knowledge graph",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source node ID"},
+                    "target_id": {"type": "string", "description": "Target node ID"},
+                    "relation": {"type": "string", "description": "Relationship type"},
+                    "properties": {"type": "object", "description": "Edge properties"}
+                },
+                "required": ["source_id", "target_id", "relation"]
+            }
+        ),
+        types.Tool(
+            name="kg_get_node",
+            description="Get node with its edges",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string", "description": "Node ID"}
+                },
+                "required": ["node_id"]
+            }
+        ),
+        types.Tool(
+            name="kg_neighbors",
+            description="Explore graph neighborhood",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string", "description": "Starting node ID"},
+                    "max_hops": {"type": "integer", "description": "Max hops", "default": 1}
+                },
+                "required": ["node_id"]
+            }
+        ),
+        types.Tool(
+            name="kg_search",
+            description="Search knowledge graph by text",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }
+        ),
+
+        # Research Tools
+        types.Tool(
+            name="research_add_note",
+            description="Add a research note",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic"},
+                    "title": {"type": "string", "description": "Note title"},
+                    "content": {"type": "string", "description": "Note content"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"}
+                },
+                "required": ["topic", "title", "content"]
+            }
+        ),
+        types.Tool(
+            name="research_list_notes",
+            description="List research notes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                }
+            }
+        ),
+        types.Tool(
+            name="research_get_note",
+            description="Get full research note",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string", "description": "Note ID"}
+                },
+                "required": ["note_id"]
+            }
+        ),
+        types.Tool(
+            name="research_add_source",
+            description="Add a reference source",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Source URL"},
+                    "title": {"type": "string", "description": "Source title"},
+                    "summary": {"type": "string", "description": "Source summary"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"}
+                },
+                "required": ["url", "title", "summary"]
+            }
+        ),
+        types.Tool(
+            name="research_list_sources",
+            description="List reference sources",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="research_log_experiment",
+            description="Log an experiment",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic"},
+                    "hypothesis": {"type": "string", "description": "Hypothesis"},
+                    "config_ref": {"type": "string", "description": "Config reference"},
+                    "result_summary": {"type": "string", "description": "Result summary"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"}
+                },
+                "required": ["topic", "hypothesis", "config_ref", "result_summary"]
+            }
+        ),
+        types.Tool(
+            name="research_list_experiments",
+            description="List experiments",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                }
+            }
+        ),
+        types.Tool(
+            name="research_link_source_to_experiment",
+            description="Link source to experiment",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source ID"},
+                    "experiment_id": {"type": "string", "description": "Experiment ID"}
+                },
+                "required": ["source_id", "experiment_id"]
+            }
+        ),
+
+        # Journal Tools
+        types.Tool(
+            name="journal_append",
+            description="Add journal entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic"},
+                    "title": {"type": "string", "description": "Entry title"},
+                    "content": {"type": "string", "description": "Entry content"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"}
+                },
+                "required": ["topic", "title", "content"]
+            }
+        ),
+        types.Tool(
+            name="journal_list",
+            description="List journal entries",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                }
+            }
+        ),
+        types.Tool(
+            name="journal_get",
+            description="Get full journal entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "string", "description": "Entry ID"}
+                },
+                "required": ["entry_id"]
+            }
+        ),
+        types.Tool(
+            name="snapshot_config",
+            description="Snapshot key configs under a label",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "Snapshot label"},
+                    "config_paths": {"type": "array", "items": {"type": "string"}, "description": "Config file paths"}
+                },
+                "required": ["label"]
+            }
+        ),
+    ]
+
+
+# =============================================================================
+# Tool Handlers
+# =============================================================================
+
+def handle_kb_add(topic: str, title: str, content: str, tags: list = None) -> dict:
+    """Add a knowledge entry."""
+    try:
+        kb_id = f"kb_{uuid.uuid4().hex[:12]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        entry = {
+            "kb_id": kb_id,
+            "topic": topic,
+            "title": title,
+            "content": content,
+            "tags": tags or [],
+            "timestamp": timestamp
+        }
+
+        # Save to topic-specific file
+        topic_file = KB_DIR / f"{topic}.json"
+        entries = load_json(topic_file, [])
+        entries.append(entry)
+        save_json(topic_file, entries)
+
+        return ResponseEnvelope.success(
+            f"Added KB entry '{title}' ({kb_id})",
+            {"kb_id": kb_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in kb_add: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kb_search(query: str, topic: str = None) -> dict:
+    """Search knowledge base."""
+    try:
+        results = []
+        if topic:
+            files = [KB_DIR / f"{topic}.json"]
+        else:
+            files = list(KB_DIR.glob("*.json"))
+
+        query_lower = query.lower()
+        for file in files:
+            if not file.exists():
+                continue
+            entries = load_json(file, [])
+            for entry in entries:
+                if (query_lower in entry.get("title", "").lower() or
+                    query_lower in entry.get("content", "").lower() or
+                    query_lower in " ".join(entry.get("tags", [])).lower()):
+                    results.append({
+                        "kb_id": entry["kb_id"],
+                        "topic": entry["topic"],
+                        "title": entry["title"],
+                        "snippet": entry["content"][:200] + "..." if len(entry["content"]) > 200 else entry["content"],
+                        "tags": entry["tags"],
+                        "timestamp": entry["timestamp"]
+                    })
+
+        return ResponseEnvelope.success(
+            f"Found {len(results)} KB entries",
+            {"results": results, "count": len(results)}
+        )
+    except Exception as e:
+        logger.error(f"Error in kb_search: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kb_get(kb_id: str) -> dict:
+    """Fetch full KB entry."""
+    try:
+        for file in KB_DIR.glob("*.json"):
+            entries = load_json(file, [])
+            for entry in entries:
+                if entry["kb_id"] == kb_id:
+                    return ResponseEnvelope.success(f"KB entry {kb_id}", {"entry": entry})
+        return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"KB entry {kb_id} not found")
+    except Exception as e:
+        logger.error(f"Error in kb_get: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kb_list(topic: str = None) -> dict:
+    """List KB entries by topic."""
+    try:
+        entries = []
+        if topic:
+            files = [KB_DIR / f"{topic}.json"]
+        else:
+            files = list(KB_DIR.glob("*.json"))
+
+        for file in files:
+            if not file.exists():
+                continue
+            file_entries = load_json(file, [])
+            for entry in file_entries:
+                entries.append({
+                    "kb_id": entry["kb_id"],
+                    "topic": entry["topic"],
+                    "title": entry["title"],
+                    "tags": entry["tags"],
+                    "timestamp": entry["timestamp"]
+                })
+
+        return ResponseEnvelope.success(
+            f"Found {len(entries)} KB entries",
+            {"entries": entries, "count": len(entries)}
+        )
+    except Exception as e:
+        logger.error(f"Error in kb_list: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kg_add_node(label: str, kind: str, properties: dict = None) -> dict:
+    """Add a concept node."""
+    try:
+        node_id = f"node_{uuid.uuid4().hex[:8]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        node = {
+            "node_id": node_id,
+            "label": label,
+            "kind": kind,
+            "properties": properties or {},
+            "timestamp": timestamp
+        }
+
+        nodes = load_json(KG_DIR / "nodes.json", [])
+        nodes.append(node)
+        save_json(KG_DIR / "nodes.json", nodes)
+
+        return ResponseEnvelope.success(
+            f"Added node '{label}' ({node_id})",
+            {"node_id": node_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in kg_add_node: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kg_add_edge(source_id: str, target_id: str, relation: str, properties: dict = None) -> dict:
+    """Link two nodes."""
+    try:
+        edge_id = f"edge_{uuid.uuid4().hex[:8]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        # Verify nodes exist
+        nodes = load_json(KG_DIR / "nodes.json", [])
+        node_ids = {node["node_id"] for node in nodes}
+
+        if source_id not in node_ids:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Source node {source_id} not found")
+        if target_id not in node_ids:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Target node {target_id} not found")
+
+        edge = {
+            "edge_id": edge_id,
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation,
+            "properties": properties or {},
+            "timestamp": timestamp
+        }
+
+        edges = load_json(KG_DIR / "edges.json", [])
+        edges.append(edge)
+        save_json(KG_DIR / "edges.json", edges)
+
+        return ResponseEnvelope.success(
+            f"Linked {source_id} → {target_id} ({relation})",
+            {"edge_id": edge_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in kg_add_edge: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kg_get_node(node_id: str) -> dict:
+    """Fetch node with edges."""
+    try:
+        nodes = load_json(KG_DIR / "nodes.json", [])
+        edges = load_json(KG_DIR / "edges.json", [])
+
+        node = next((n for n in nodes if n["node_id"] == node_id), None)
+        if not node:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Node {node_id} not found")
+
+        outgoing = [e for e in edges if e["source_id"] == node_id]
+        incoming = [e for e in edges if e["target_id"] == node_id]
+
+        return ResponseEnvelope.success(
+            f"Node {node_id}",
+            {"node": node, "outgoing_edges": outgoing, "incoming_edges": incoming}
+        )
+    except Exception as e:
+        logger.error(f"Error in kg_get_node: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kg_neighbors(node_id: str, max_hops: int = 1) -> dict:
+    """Explore graph neighborhood."""
+    try:
+        nodes = load_json(KG_DIR / "nodes.json", [])
+        edges = load_json(KG_DIR / "edges.json", [])
+
+        if not any(n["node_id"] == node_id for n in nodes):
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Node {node_id} not found")
+
+        visited = {node_id}
+        current_level = {node_id}
+        all_edges = []
+
+        for hop in range(max_hops):
+            next_level = set()
+            for current in current_level:
+                for edge in edges:
+                    if edge["source_id"] == current:
+                        next_level.add(edge["target_id"])
+                        all_edges.append(edge)
+                    elif edge["target_id"] == current:
+                        next_level.add(edge["source_id"])
+                        all_edges.append(edge)
+
+            new_nodes = next_level - visited
+            visited.update(new_nodes)
+            current_level = new_nodes
+
+            if not current_level:
+                break
+
+        neighbor_nodes = [n for n in nodes if n["node_id"] in visited and n["node_id"] != node_id]
+
+        return ResponseEnvelope.success(
+            f"Found {len(neighbor_nodes)} neighbors within {max_hops} hops",
+            {"neighbors": neighbor_nodes, "edges": all_edges, "count": len(neighbor_nodes)}
+        )
+    except Exception as e:
+        logger.error(f"Error in kg_neighbors: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_kg_search(query: str) -> dict:
+    """Search graph nodes by text."""
+    try:
+        nodes = load_json(KG_DIR / "nodes.json", [])
+        query_lower = query.lower()
+
+        results = []
+        for node in nodes:
+            if (query_lower in node.get("label", "").lower() or
+                query_lower in node.get("kind", "").lower() or
+                query_lower in json.dumps(node.get("properties", {})).lower()):
+                results.append(node)
+
+        return ResponseEnvelope.success(
+            f"Found {len(results)} nodes",
+            {"results": results, "count": len(results)}
+        )
+    except Exception as e:
+        logger.error(f"Error in kg_search: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_add_note(topic: str, title: str, content: str, tags: list = None) -> dict:
+    """Add a research note."""
+    try:
+        note_id = f"note_{uuid.uuid4().hex[:12]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        note = {
+            "note_id": note_id,
+            "topic": topic,
+            "title": title,
+            "content": content,
+            "tags": tags or [],
+            "timestamp": timestamp
+        }
+
+        notes_file = RESEARCH_DIR / "notes.json"
+        notes = load_json(notes_file, [])
+        notes.append(note)
+        save_json(notes_file, notes)
+
+        return ResponseEnvelope.success(
+            f"Added research note '{title}' ({note_id})",
+            {"note_id": note_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_add_note: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_list_notes(topic: str = None) -> dict:
+    """List research notes."""
+    try:
+        notes_file = RESEARCH_DIR / "notes.json"
+        notes = load_json(notes_file, [])
+
+        if topic:
+            notes = [n for n in notes if n.get("topic") == topic]
+
+        summaries = [{
+            "note_id": n["note_id"],
+            "topic": n["topic"],
+            "title": n["title"],
+            "tags": n["tags"],
+            "timestamp": n["timestamp"]
+        } for n in notes]
+
+        return ResponseEnvelope.success(
+            f"Found {len(summaries)} research notes",
+            {"notes": summaries, "count": len(summaries)}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_list_notes: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_get_note(note_id: str) -> dict:
+    """Fetch full research note."""
+    try:
+        notes_file = RESEARCH_DIR / "notes.json"
+        notes = load_json(notes_file, [])
+
+        note = next((n for n in notes if n["note_id"] == note_id), None)
+        if not note:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Research note {note_id} not found")
+
+        return ResponseEnvelope.success(f"Research note {note_id}", {"note": note})
+    except Exception as e:
+        logger.error(f"Error in research_get_note: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_add_source(url: str, title: str, summary: str, tags: list = None) -> dict:
+    """Add a reference source."""
+    try:
+        source_id = f"src_{uuid.uuid4().hex[:12]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        source = {
+            "source_id": source_id,
+            "url": url,
+            "title": title,
+            "summary": summary,
+            "tags": tags or [],
+            "timestamp": timestamp
+        }
+
+        sources_file = RESEARCH_DIR / "sources.json"
+        sources = load_json(sources_file, [])
+        sources.append(source)
+        save_json(sources_file, sources)
+
+        return ResponseEnvelope.success(
+            f"Added source '{title}' ({source_id})",
+            {"source_id": source_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_add_source: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_list_sources() -> dict:
+    """List reference sources."""
+    try:
+        sources_file = RESEARCH_DIR / "sources.json"
+        sources = load_json(sources_file, [])
+
+        summaries = [{
+            "source_id": s["source_id"],
+            "url": s["url"],
+            "title": s["title"],
+            "tags": s["tags"],
+            "timestamp": s["timestamp"]
+        } for s in sources]
+
+        return ResponseEnvelope.success(
+            f"Found {len(summaries)} sources",
+            {"sources": summaries, "count": len(summaries)}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_list_sources: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_log_experiment(topic: str, hypothesis: str, config_ref: str,
+                                    result_summary: str, tags: list = None) -> dict:
+    """Log an experiment."""
+    try:
+        exp_id = f"exp_{uuid.uuid4().hex[:12]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        experiment = {
+            "experiment_id": exp_id,
+            "topic": topic,
+            "hypothesis": hypothesis,
+            "config_ref": config_ref,
+            "result_summary": result_summary,
+            "tags": tags or [],
+            "timestamp": timestamp,
+            "linked_sources": []
+        }
+
+        experiments_file = RESEARCH_DIR / "experiments.json"
+        experiments = load_json(experiments_file, [])
+        experiments.append(experiment)
+        save_json(experiments_file, experiments)
+
+        return ResponseEnvelope.success(
+            f"Logged experiment ({exp_id})",
+            {"experiment_id": exp_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_log_experiment: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_list_experiments(topic: str = None) -> dict:
+    """List experiments."""
+    try:
+        experiments_file = RESEARCH_DIR / "experiments.json"
+        experiments = load_json(experiments_file, [])
+
+        if topic:
+            experiments = [e for e in experiments if e.get("topic") == topic]
+
+        summaries = [{
+            "experiment_id": e["experiment_id"],
+            "topic": e["topic"],
+            "hypothesis": e["hypothesis"],
+            "config_ref": e["config_ref"],
+            "tags": e["tags"],
+            "timestamp": e["timestamp"]
+        } for e in experiments]
+
+        return ResponseEnvelope.success(
+            f"Found {len(summaries)} experiments",
+            {"experiments": summaries, "count": len(summaries)}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_list_experiments: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_research_link_source_to_experiment(source_id: str, experiment_id: str) -> dict:
+    """Link a source to an experiment."""
+    try:
+        experiments_file = RESEARCH_DIR / "experiments.json"
+        experiments = load_json(experiments_file, [])
+
+        experiment = next((e for e in experiments if e["experiment_id"] == experiment_id), None)
+        if not experiment:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Experiment {experiment_id} not found")
+
+        if source_id not in experiment["linked_sources"]:
+            experiment["linked_sources"].append(source_id)
+            save_json(experiments_file, experiments)
+
+        return ResponseEnvelope.success(
+            f"Linked source {source_id} to experiment {experiment_id}",
+            {"experiment_id": experiment_id, "linked_sources": experiment["linked_sources"]}
+        )
+    except Exception as e:
+        logger.error(f"Error in research_link_source_to_experiment: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_journal_append(topic: str, title: str, content: str, tags: list = None) -> dict:
+    """Persist decisions/notes to journal."""
+    try:
+        entry_id = f"journal_{uuid.uuid4().hex[:12]}"
+        timestamp = datetime.utcnow().isoformat()
+
+        entry = {
+            "entry_id": entry_id,
+            "topic": topic,
+            "title": title,
+            "content": content,
+            "tags": tags or [],
+            "timestamp": timestamp
+        }
+
+        journal_file = JOURNAL_DIR / f"{topic}.json"
+        entries = load_json(journal_file, [])
+        entries.append(entry)
+        save_json(journal_file, entries)
+
+        return ResponseEnvelope.success(
+            f"Added journal entry '{title}' ({entry_id})",
+            {"entry_id": entry_id, "timestamp": timestamp}
+        )
+    except Exception as e:
+        logger.error(f"Error in journal_append: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_journal_list(topic: str = None) -> dict:
+    """List journal entries."""
+    try:
+        entries = []
+
+        if topic:
+            files = [JOURNAL_DIR / f"{topic}.json"]
+        else:
+            files = list(JOURNAL_DIR.glob("*.json"))
+
+        for file in files:
+            if not file.exists() or file.name == "snapshots.json":
+                continue
+            file_entries = load_json(file, [])
+            for entry in file_entries:
+                entries.append({
+                    "entry_id": entry["entry_id"],
+                    "topic": entry["topic"],
+                    "title": entry["title"],
+                    "tags": entry["tags"],
+                    "timestamp": entry["timestamp"]
+                })
+
+        return ResponseEnvelope.success(
+            f"Found {len(entries)} journal entries",
+            {"entries": entries, "count": len(entries)}
+        )
+    except Exception as e:
+        logger.error(f"Error in journal_list: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_journal_get(entry_id: str) -> dict:
+    """Fetch full journal entry."""
+    try:
+        for file in JOURNAL_DIR.glob("*.json"):
+            if file.name == "snapshots.json":
+                continue
+            entries = load_json(file, [])
+            for entry in entries:
+                if entry["entry_id"] == entry_id:
+                    return ResponseEnvelope.success(f"Journal entry {entry_id}", {"entry": entry})
+
+        return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Journal entry {entry_id} not found")
+    except Exception as e:
+        logger.error(f"Error in journal_get: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+def handle_snapshot_config(label: str, config_paths: list = None) -> dict:
+    """Snapshot key configs under a label."""
+    try:
+        timestamp = datetime.utcnow().isoformat()
+
+        if not config_paths:
+            config_paths = [
+                "/srv/latvian_learning/config.yaml",
+                "/srv/latvian_xtts/config/training_config.yaml",
+            ]
+
+        snapshot = {
+            "label": label,
+            "timestamp": timestamp,
+            "configs": {}
+        }
+
+        for path in config_paths:
+            if Path(path).exists():
+                with open(path) as f:
+                    if path.endswith('.yaml') or path.endswith('.yml'):
+                        snapshot["configs"][path] = yaml.safe_load(f)
+                    elif path.endswith('.json'):
+                        snapshot["configs"][path] = json.load(f)
+                    else:
+                        snapshot["configs"][path] = f.read()
+
+        snapshots_file = JOURNAL_DIR / "snapshots.json"
+        snapshots = load_json(snapshots_file, [])
+        snapshots.append(snapshot)
+        save_json(snapshots_file, snapshots)
+
+        return ResponseEnvelope.success(
+            f"Snapshotted {len(snapshot['configs'])} configs as '{label}'",
+            {
+                "label": label,
+                "timestamp": timestamp,
+                "config_count": len(snapshot['configs']),
+                "paths": list(snapshot['configs'].keys())
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in snapshot_config: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e))
+
+
+# =============================================================================
+# Tool Router
+# =============================================================================
+
+@app.call_tool()
+async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
+    """Handle tool calls."""
+    try:
+        # Knowledge Base Tools
+        if name == "kb_add":
+            return format_response(handle_kb_add(**arguments))
+        elif name == "kb_search":
+            return format_response(handle_kb_search(**arguments))
+        elif name == "kb_get":
+            return format_response(handle_kb_get(**arguments))
+        elif name == "kb_list":
+            return format_response(handle_kb_list(**arguments))
+
+        # Knowledge Graph Tools
+        elif name == "kg_add_node":
+            return format_response(handle_kg_add_node(**arguments))
+        elif name == "kg_add_edge":
+            return format_response(handle_kg_add_edge(**arguments))
+        elif name == "kg_get_node":
+            return format_response(handle_kg_get_node(**arguments))
+        elif name == "kg_neighbors":
+            return format_response(handle_kg_neighbors(**arguments))
+        elif name == "kg_search":
+            return format_response(handle_kg_search(**arguments))
+
+        # Research Tools
+        elif name == "research_add_note":
+            return format_response(handle_research_add_note(**arguments))
+        elif name == "research_list_notes":
+            return format_response(handle_research_list_notes(**arguments))
+        elif name == "research_get_note":
+            return format_response(handle_research_get_note(**arguments))
+        elif name == "research_add_source":
+            return format_response(handle_research_add_source(**arguments))
+        elif name == "research_list_sources":
+            return format_response(handle_research_list_sources())
+        elif name == "research_log_experiment":
+            return format_response(handle_research_log_experiment(**arguments))
+        elif name == "research_list_experiments":
+            return format_response(handle_research_list_experiments(**arguments))
+        elif name == "research_link_source_to_experiment":
+            return format_response(handle_research_link_source_to_experiment(**arguments))
+
+        # Journal Tools
+        elif name == "journal_append":
+            return format_response(handle_journal_append(**arguments))
+        elif name == "journal_list":
+            return format_response(handle_journal_list(**arguments))
+        elif name == "journal_get":
+            return format_response(handle_journal_get(**arguments))
+        elif name == "snapshot_config":
+            return format_response(handle_snapshot_config(**arguments))
+
+        else:
+            return format_response(ResponseEnvelope.error(
+                ErrorCodes.INVALID_ARGUMENT,
+                f"Unknown tool: {name}"
+            ))
+
+    except Exception as e:
+        logger.error(f"Error calling tool {name}: {e}")
+        return format_response(ResponseEnvelope.error(ErrorCodes.UNEXPECTED, str(e)))
+
+
+def main():
+    """Run the MCP server."""
+    import asyncio
+    logger.info("Starting knowledge-mcp server")
+
+    async def _run():
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(read_stream, write_stream, app.create_initialization_options())
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    main()

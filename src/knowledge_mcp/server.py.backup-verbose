@@ -1,0 +1,1645 @@
+#!/usr/bin/env python3
+"""
+Knowledge MCP Server - Supabase Backend
+
+Unified knowledge management system for:
+- Knowledge Base (structured documents)
+- Knowledge Graph (concepts and relations)
+- Research (notes, sources, experiments)
+- Journal (decision log and config snapshots)
+
+Spec: LATVIAN_LAB_MCP_MASTER_SPEC_v1.3 § 4.1 + § 4.1.5 (Document Ingestion)
+"""
+
+import os
+import sys
+import json
+import logging
+import threading
+from pathlib import Path
+from typing import Any, List, Dict
+from datetime import datetime, date
+import uuid
+import hashlib
+import glob as glob_module
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import sentry_sdk
+import yaml
+from supabase import Client
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp import types
+
+# Import document processor and MCP scanner
+from .doc_processor import DocumentProcessor
+from .mcp_index_scanner import MCPIndexScanner
+
+# Add shared utilities to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent / "shared"))
+from response import ResponseEnvelope, ErrorCodes
+from env_config import get_env, require_env
+from connection_pool import get_supabase_client, retry_on_network_error
+
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Initialize Sentry
+SENTRY_DSN = get_env("SENTRY_DSN")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        traces_sample_rate=1.0,
+        environment=get_env("SENTRY_ENVIRONMENT", "development"),
+        release=get_env("SENTRY_RELEASE", "latvian-lab@1.0.0"),
+    )
+    logger.info("Sentry monitoring enabled")
+
+# Initialize MCP server
+app = Server("knowledge-mcp")
+
+# Supabase Configuration (will be initialized in main())
+SUPABASE_URL: str = ""
+SUPABASE_KEY: str = ""
+supabase: Client = None  # type: ignore
+
+
+
+def format_response(response: dict) -> list[types.TextContent]:
+    """Format response as MCP TextContent."""
+    return [types.TextContent(type="text", text=json.dumps(response))]
+
+
+# =============================================================================
+# Tool Registration
+# =============================================================================
+
+@app.list_tools()
+async def list_tools() -> list[types.Tool]:
+    """List all available tools."""
+    return [
+        # Knowledge Base Tools (4)
+        types.Tool(
+            name="kb_add",
+            description="Add a knowledge base entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic"},
+                    "title": {"type": "string", "description": "Entry title"},
+                    "content": {"type": "string", "description": "Entry content"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags"}
+                },
+                "required": ["topic", "title", "content"]
+            }
+        ),
+        types.Tool(
+            name="kb_search",
+            description="Search knowledge base",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                },
+                "required": ["query"]
+            }
+        ),
+        types.Tool(
+            name="kb_get",
+            description="Get full KB entry by ID",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "KB entry ID"}
+                },
+                "required": ["kb_id"]
+            }
+        ),
+        types.Tool(
+            name="kb_list",
+            description="List KB entries",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                }
+            }
+        ),
+
+        # Knowledge Graph Tools (5)
+        types.Tool(
+            name="kg_add_node",
+            description="Add a node to knowledge graph",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "Node label"},
+                    "kind": {"type": "string", "enum": ["concept", "entity", "event", "attribute"]},
+                    "properties": {"type": "object", "description": "Node properties"}
+                },
+                "required": ["label", "kind"]
+            }
+        ),
+        types.Tool(
+            name="kg_add_edge",
+            description="Add edge between KG nodes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from_node": {"type": "string", "description": "Source node ID"},
+                    "to_node": {"type": "string", "description": "Target node ID"},
+                    "relation": {"type": "string", "description": "Relation type"},
+                    "properties": {"type": "object", "description": "Edge properties"}
+                },
+                "required": ["from_node", "to_node", "relation"]
+            }
+        ),
+        types.Tool(
+            name="kg_get_node",
+            description="Get KG node details",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string", "description": "Node ID"}
+                },
+                "required": ["node_id"]
+            }
+        ),
+        types.Tool(
+            name="kg_neighbors",
+            description="Get neighboring nodes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string", "description": "Node ID"}
+                },
+                "required": ["node_id"]
+            }
+        ),
+        types.Tool(
+            name="kg_search",
+            description="Search knowledge graph",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "kind": {"type": "string", "description": "Filter by kind"}
+                },
+                "required": ["query"]
+            }
+        ),
+
+        # Research Tools (8)
+        types.Tool(
+            name="research_add_note",
+            description="Add research note",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["topic", "title", "content"]
+            }
+        ),
+        types.Tool(
+            name="research_list_notes",
+            description="List research notes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Filter by topic"}
+                }
+            }
+        ),
+        types.Tool(
+            name="research_get_note",
+            description="Get research note",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "note_id": {"type": "string"}
+                },
+                "required": ["note_id"]
+            }
+        ),
+        types.Tool(
+            name="research_add_source",
+            description="Add research source",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["paper", "book", "article", "url", "dataset"]},
+                    "url": {"type": "string"},
+                    "authors": {"type": "array", "items": {"type": "string"}},
+                    "year": {"type": "integer"},
+                    "notes": {"type": "string"}
+                },
+                "required": ["title", "kind"]
+            }
+        ),
+        types.Tool(
+            name="research_list_sources",
+            description="List research sources",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"}
+                }
+            }
+        ),
+        types.Tool(
+            name="research_log_experiment",
+            description="Log experiment",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "hypothesis": {"type": "string"},
+                    "methodology": {"type": "string"},
+                    "results": {"type": "object"},
+                    "conclusion": {"type": "string"}
+                },
+                "required": ["title"]
+            }
+        ),
+        types.Tool(
+            name="research_list_experiments",
+            description="List experiments",
+            inputSchema={"type": "object", "properties": {}}
+        ),
+        types.Tool(
+            name="research_link_source_to_experiment",
+            description="Link source to experiment",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string"},
+                    "experiment_id": {"type": "string"}
+                },
+                "required": ["source_id", "experiment_id"]
+            }
+        ),
+
+        # Journal Tools (4)
+        types.Tool(
+            name="journal_append",
+            description="Append journal entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entry_type": {"type": "string", "enum": ["daily", "milestone", "reflection", "idea"]},
+                    "content": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["entry_type", "content"]
+            }
+        ),
+        types.Tool(
+            name="journal_list",
+            description="List journal entries",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20}
+                }
+            }
+        ),
+        types.Tool(
+            name="journal_get",
+            description="Get journal entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "string"}
+                },
+                "required": ["entry_id"]
+            }
+        ),
+        types.Tool(
+            name="snapshot_config",
+            description="Snapshot current config",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string"},
+                    "config_data": {"type": "object"}
+                },
+                "required": ["config_name", "config_data"]
+            }
+        ),
+
+        # Document Ingestion Tools (4) - v1.3
+        types.Tool(
+            name="kb_ingest_doc",
+            description="Ingest single markdown file into KB with change detection",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "doc_path": {"type": "string", "description": "Absolute path to markdown file"},
+                    "strategy": {
+                        "type": "string",
+                        "enum": ["full", "chunked", "summary"],
+                        "default": "chunked",
+                        "description": "Ingestion strategy: full (one entry), chunked (by sections), summary (GPT summary)"
+                    },
+                    "chunk_size": {"type": "integer", "default": 2000, "description": "Max tokens per chunk (chunked strategy only)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Additional tags"},
+                    "overwrite": {"type": "boolean", "default": False, "description": "Replace existing KB entries from this doc"}
+                },
+                "required": ["doc_path"]
+            }
+        ),
+        types.Tool(
+            name="kb_ingest_dir",
+            description="Batch ingest directory of markdown files",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dir_path": {"type": "string", "description": "Directory to scan"},
+                    "pattern": {"type": "string", "default": "*.md", "description": "File pattern (e.g., *.md)"},
+                    "strategy": {"type": "string", "enum": ["full", "chunked", "summary"], "default": "chunked"},
+                    "recursive": {"type": "boolean", "default": True, "description": "Scan subdirectories"},
+                    "exclude_patterns": {"type": "array", "items": {"type": "string"}, "description": "Patterns to exclude"}
+                },
+                "required": ["dir_path"]
+            }
+        ),
+        types.Tool(
+            name="kb_sync_status",
+            description="Check sync state between source docs and KB",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dir_path": {"type": "string", "description": "Directory to check"}
+                },
+                "required": ["dir_path"]
+            }
+        ),
+        types.Tool(
+            name="kb_link_to_source",
+            description="Get source document reference for a KB entry",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kb_id": {"type": "string", "description": "KB entry ID"}
+                },
+                "required": ["kb_id"]
+            }
+        ),
+
+        # MCP Index Tools (5)
+        types.Tool(
+            name="mcp_index_scan",
+            description="Scan all MCP servers and index their tools",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "triggered_by": {"type": "string", "default": "manual", "description": "Source of scan (manual, cron, deployment)"}
+                }
+            }
+        ),
+        types.Tool(
+            name="mcp_index_search",
+            description="Search for MCP tools by description/capability",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "category": {"type": "string", "description": "Optional category filter (search, storage, processing, etc.)"},
+                    "limit": {"type": "integer", "default": 20, "description": "Maximum results"}
+                },
+                "required": ["query"]
+            }
+        ),
+        types.Tool(
+            name="mcp_index_get_server",
+            description="Get all tools for a specific MCP server",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "server_id": {"type": "string", "description": "Server ID (e.g., 'knowledge-mcp')"}
+                },
+                "required": ["server_id"]
+            }
+        ),
+        types.Tool(
+            name="mcp_index_get_tool",
+            description="Get detailed information about a specific tool",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "Tool name (e.g., 'kb_search')"}
+                },
+                "required": ["tool_name"]
+            }
+        ),
+        types.Tool(
+            name="mcp_index_rebuild",
+            description="Force rebuild of entire MCP index (same as mcp_index_scan)",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+    ]
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
+    """Route tool calls to handlers."""
+    try:
+        # KB Tools
+        if name == "kb_add":
+            return format_response(handle_kb_add(**arguments))
+        elif name == "kb_search":
+            return format_response(handle_kb_search(**arguments))
+        elif name == "kb_get":
+            return format_response(handle_kb_get(**arguments))
+        elif name == "kb_list":
+            return format_response(handle_kb_list(**arguments))
+
+        # KG Tools (Supabase backend)
+        elif name == "kg_add_node":
+            return format_response(handle_kg_add_node(**arguments))
+        elif name == "kg_add_edge":
+            return format_response(handle_kg_add_edge(**arguments))
+        elif name == "kg_get_node":
+            return format_response(handle_kg_get_node(**arguments))
+        elif name == "kg_neighbors":
+            return format_response(handle_kg_neighbors(**arguments))
+        elif name == "kg_search":
+            return format_response(handle_kg_search(**arguments))
+
+        # Research Tools
+        elif name == "research_add_note":
+            return format_response(handle_research_add_note(**arguments))
+        elif name == "research_list_notes":
+            return format_response(handle_research_list_notes(**arguments))
+        elif name == "research_get_note":
+            return format_response(handle_research_get_note(**arguments))
+        elif name == "research_add_source":
+            return format_response(handle_research_add_source(**arguments))
+        elif name == "research_list_sources":
+            return format_response(handle_research_list_sources(**arguments))
+        elif name == "research_log_experiment":
+            return format_response(handle_research_log_experiment(**arguments))
+        elif name == "research_list_experiments":
+            return format_response(handle_research_list_experiments(**arguments))
+        elif name == "research_link_source_to_experiment":
+            return format_response(handle_research_link_source_to_experiment(**arguments))
+
+        # Journal Tools
+        elif name == "journal_append":
+            return format_response(handle_journal_append(**arguments))
+        elif name == "journal_list":
+            return format_response(handle_journal_list(**arguments))
+        elif name == "journal_get":
+            return format_response(handle_journal_get(**arguments))
+        elif name == "snapshot_config":
+            return format_response(handle_snapshot_config(**arguments))
+
+        # Document Ingestion Tools (v1.3)
+        elif name == "kb_ingest_doc":
+            return format_response(handle_kb_ingest_doc(**arguments))
+        elif name == "kb_ingest_dir":
+            return format_response(handle_kb_ingest_dir(**arguments))
+        elif name == "kb_sync_status":
+            return format_response(handle_kb_sync_status(**arguments))
+        elif name == "kb_link_to_source":
+            return format_response(handle_kb_link_to_source(**arguments))
+
+        # MCP Index Tools
+        elif name == "mcp_index_scan":
+            return format_response(handle_mcp_index_scan(**arguments))
+        elif name == "mcp_index_search":
+            return format_response(handle_mcp_index_search(**arguments))
+        elif name == "mcp_index_get_server":
+            return format_response(handle_mcp_index_get_server(**arguments))
+        elif name == "mcp_index_get_tool":
+            return format_response(handle_mcp_index_get_tool(**arguments))
+        elif name == "mcp_index_rebuild":
+            return format_response(handle_mcp_index_rebuild(**arguments))
+
+        else:
+            return format_response(
+                ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Unknown tool: {name}")
+            )
+    except Exception as e:
+        logger.error(f"Error in {name}: {e}", exc_info=True)
+        return format_response(ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e)))
+
+
+# =============================================================================
+# Knowledge Base Handlers
+# =============================================================================
+
+def handle_kb_add(topic: str, title: str, content: str, tags: list = None) -> dict:
+    """Add KB entry."""
+    try:
+        kb_id = f"kb_{uuid.uuid4().hex[:12]}"
+
+        entry = {
+            "kb_id": kb_id,
+            "topic": topic,
+            "title": title,
+            "content": content,
+            "tags": tags or []
+        }
+
+        supabase.table("kb_entries").insert(entry).execute()
+
+        return ResponseEnvelope.success(
+            f"Added KB entry: {title}",
+            {"kb_id": kb_id, "topic": topic}
+        )
+    except Exception as e:
+        logger.error(f"Error adding KB entry: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kb_search(query: str, topic: str = None) -> dict:
+    """Search KB entries using PostgreSQL full-text search."""
+    try:
+        # Sanitize query for tsquery - replace spaces with & for AND logic
+        # This makes "Phase 2" search for "Phase & 2"
+        tsquery_safe = query.strip().replace(" ", " & ")
+
+        query_builder = supabase.table("kb_entries")\
+            .select("kb_id, topic, title, tags")
+
+        if topic:
+            query_builder = query_builder.eq("topic", topic)
+
+        # Use PostgreSQL full-text search with websearch syntax (most forgiving)
+        # This leverages the GIN index: idx_kb_search on to_tsvector('english', title || ' ' || content)
+        # PostgREST will use the index automatically when we search on title or content
+        try:
+            # Try websearch FTS first (most flexible - handles phrases, AND/OR)
+            query_builder = query_builder.or_(
+                f"title.wfts.{query},content.wfts.{query}"
+            )
+        except Exception as fts_error:
+            # Fallback to plain text FTS if websearch fails
+            logger.warning(f"Websearch FTS failed, using plain FTS: {fts_error}")
+            query_builder = query_builder.or_(
+                f"title.plfts.{tsquery_safe},content.plfts.{tsquery_safe}"
+            )
+
+        result = query_builder.limit(50).execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} KB entries",
+            {"results": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error searching KB: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kb_get(kb_id: str) -> dict:
+    """Get KB entry details."""
+    try:
+        result = supabase.table("kb_entries")\
+            .select("*")\
+            .eq("kb_id", kb_id)\
+            .maybe_single()\
+            .execute()
+
+        if not result or not result.data:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"KB entry not found: {kb_id}")
+
+        return ResponseEnvelope.success(
+            f"KB entry: {result.data['title']}",
+            result.data
+        )
+    except Exception as e:
+        logger.error(f"Error getting KB entry: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kb_list(topic: str = None) -> dict:
+    """List KB entries."""
+    try:
+        query = supabase.table("kb_entries")\
+            .select("kb_id, topic, title, tags, created_at")\
+            .order("created_at", desc=True)
+
+        if topic:
+            query = query.eq("topic", topic)
+
+        result = query.limit(100).execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} KB entries",
+            {"entries": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error listing KB entries: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+# =============================================================================
+# Knowledge Graph Handlers
+# =============================================================================
+
+def handle_kg_add_node(label: str, kind: str, properties: dict = None) -> dict:
+    """Add KG node."""
+    try:
+        node_id = f"node_{uuid.uuid4().hex[:12]}"
+
+        node = {
+            "node_id": node_id,
+            "label": label,
+            "kind": kind,
+            "properties": properties or {}
+        }
+
+        supabase.table("kg_nodes").insert(node).execute()
+
+        return ResponseEnvelope.success(
+            f"Added KG node: {label}",
+            {"node_id": node_id, "label": label}
+        )
+    except Exception as e:
+        logger.error(f"Error adding KG node: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kg_add_edge(from_node: str, to_node: str, relation: str, properties: dict = None) -> dict:
+    """Add KG edge."""
+    try:
+        edge_id = f"edge_{uuid.uuid4().hex[:12]}"
+
+        edge = {
+            "edge_id": edge_id,
+            "from_node": from_node,
+            "to_node": to_node,
+            "relation": relation,
+            "properties": properties or {}
+        }
+
+        supabase.table("kg_edges").insert(edge).execute()
+
+        return ResponseEnvelope.success(
+            f"Added edge: {from_node} --[{relation}]--> {to_node}",
+            {"edge_id": edge_id}
+        )
+    except Exception as e:
+        logger.error(f"Error adding KG edge: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kg_get_node(node_id: str) -> dict:
+    """Get KG node."""
+    try:
+        result = supabase.table("kg_nodes")\
+            .select("*")\
+            .eq("node_id", node_id)\
+            .maybe_single()\
+            .execute()
+
+        if not result or not result.data:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Node not found: {node_id}")
+
+        return ResponseEnvelope.success(
+            f"Node: {result.data['label']}",
+            result.data
+        )
+    except Exception as e:
+        logger.error(f"Error getting KG node: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kg_neighbors(node_id: str) -> dict:
+    """Get neighboring nodes."""
+    try:
+        # Get outgoing edges
+        outgoing = supabase.table("kg_edges")\
+            .select("*, to_node:kg_nodes!to_node(node_id, label, kind)")\
+            .eq("from_node", node_id)\
+            .execute()
+
+        # Get incoming edges
+        incoming = supabase.table("kg_edges")\
+            .select("*, from_node:kg_nodes!from_node(node_id, label, kind)")\
+            .eq("to_node", node_id)\
+            .execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(outgoing.data)} outgoing, {len(incoming.data)} incoming edges",
+            {
+                "outgoing": outgoing.data,
+                "incoming": incoming.data
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error getting neighbors: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kg_search(query: str, kind: str = None) -> dict:
+    """Search KG nodes."""
+    try:
+        query_builder = supabase.table("kg_nodes")\
+            .select("node_id, label, kind")\
+            .ilike("label", f"%{query}%")
+
+        if kind:
+            query_builder = query_builder.eq("kind", kind)
+
+        result = query_builder.limit(50).execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} nodes",
+            {"nodes": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error searching KG: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+# =============================================================================
+# Research Handlers
+# =============================================================================
+
+def handle_research_add_note(topic: str, title: str, content: str, tags: list = None) -> dict:
+    """Add research note."""
+    try:
+        note_id = f"note_{uuid.uuid4().hex[:12]}"
+
+        note = {
+            "note_id": note_id,
+            "topic": topic,
+            "title": title,
+            "content": content,
+            "tags": tags or []
+        }
+
+        supabase.table("research_notes").insert(note).execute()
+
+        return ResponseEnvelope.success(
+            f"Added research note: {title}",
+            {"note_id": note_id}
+        )
+    except Exception as e:
+        logger.error(f"Error adding research note: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_list_notes(topic: str = None) -> dict:
+    """List research notes."""
+    try:
+        query = supabase.table("research_notes")\
+            .select("note_id, topic, title, tags, created_at")\
+            .order("created_at", desc=True)
+
+        if topic:
+            query = query.eq("topic", topic)
+
+        result = query.limit(100).execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} notes",
+            {"notes": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error listing research notes: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_get_note(note_id: str) -> dict:
+    """Get research note."""
+    try:
+        result = supabase.table("research_notes")\
+            .select("*")\
+            .eq("note_id", note_id)\
+            .maybe_single()\
+            .execute()
+
+        if not result or not result.data:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Note not found: {note_id}")
+
+        return ResponseEnvelope.success(
+            f"Note: {result.data['title']}",
+            result.data
+        )
+    except Exception as e:
+        logger.error(f"Error getting research note: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_add_source(title: str, kind: str, url: str = None,
+                               authors: list = None, year: int = None, notes: str = None) -> dict:
+    """Add research source."""
+    try:
+        source_id = f"src_{uuid.uuid4().hex[:12]}"
+
+        source = {
+            "source_id": source_id,
+            "title": title,
+            "kind": kind,
+            "url": url,
+            "authors": authors or [],
+            "year": year,
+            "notes": notes
+        }
+
+        supabase.table("research_sources").insert(source).execute()
+
+        return ResponseEnvelope.success(
+            f"Added source: {title}",
+            {"source_id": source_id}
+        )
+    except Exception as e:
+        logger.error(f"Error adding research source: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_list_sources(kind: str = None) -> dict:
+    """List research sources."""
+    try:
+        query = supabase.table("research_sources")\
+            .select("source_id, title, kind, authors, year")\
+            .order("created_at", desc=True)
+
+        if kind:
+            query = query.eq("kind", kind)
+
+        result = query.limit(100).execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} sources",
+            {"sources": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error listing research sources: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_log_experiment(title: str, hypothesis: str = None,
+                                   methodology: str = None, results: dict = None,
+                                   conclusion: str = None) -> dict:
+    """Log experiment."""
+    try:
+        experiment_id = f"exp_{uuid.uuid4().hex[:12]}"
+
+        experiment = {
+            "experiment_id": experiment_id,
+            "title": title,
+            "hypothesis": hypothesis,
+            "methodology": methodology,
+            "results": results or {},
+            "conclusion": conclusion
+        }
+
+        supabase.table("research_experiments").insert(experiment).execute()
+
+        return ResponseEnvelope.success(
+            f"Logged experiment: {title}",
+            {"experiment_id": experiment_id}
+        )
+    except Exception as e:
+        logger.error(f"Error logging experiment: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_list_experiments() -> dict:
+    """List experiments."""
+    try:
+        result = supabase.table("research_experiments")\
+            .select("experiment_id, title, created_at")\
+            .order("created_at", desc=True)\
+            .limit(100)\
+            .execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} experiments",
+            {"experiments": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error listing experiments: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_research_link_source_to_experiment(source_id: str, experiment_id: str) -> dict:
+    """Link source to experiment."""
+    try:
+        link_id = f"link_{uuid.uuid4().hex[:12]}"
+
+        link = {
+            "link_id": link_id,
+            "source_id": source_id,
+            "experiment_id": experiment_id
+        }
+
+        supabase.table("research_source_links").insert(link).execute()
+
+        return ResponseEnvelope.success(
+            f"Linked source {source_id} to experiment {experiment_id}",
+            {"link_id": link_id}
+        )
+    except Exception as e:
+        logger.error(f"Error linking source to experiment: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+# =============================================================================
+# Journal Handlers
+# =============================================================================
+
+def handle_journal_append(entry_type: str, content: str, tags: list = None) -> dict:
+    """Append journal entry."""
+    try:
+        entry_id = f"jrnl_{uuid.uuid4().hex[:12]}"
+
+        entry = {
+            "entry_id": entry_id,
+            "date": date.today().isoformat(),
+            "entry_type": entry_type,
+            "content": content,
+            "tags": tags or []
+        }
+
+        supabase.table("journal_entries").insert(entry).execute()
+
+        return ResponseEnvelope.success(
+            f"Added journal entry ({entry_type})",
+            {"entry_id": entry_id, "date": entry["date"]}
+        )
+    except Exception as e:
+        logger.error(f"Error appending journal: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_journal_list(limit: int = 20) -> dict:
+    """List journal entries."""
+    try:
+        result = supabase.table("journal_entries")\
+            .select("entry_id, date, entry_type, tags")\
+            .order("date", desc=True)\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+
+        return ResponseEnvelope.success(
+            f"Found {len(result.data)} journal entries",
+            {"entries": result.data, "count": len(result.data)}
+        )
+    except Exception as e:
+        logger.error(f"Error listing journal: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_journal_get(entry_id: str) -> dict:
+    """Get journal entry."""
+    try:
+        result = supabase.table("journal_entries")\
+            .select("*")\
+            .eq("entry_id", entry_id)\
+            .maybe_single()\
+            .execute()
+
+        if not result or not result.data:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Journal entry not found: {entry_id}")
+
+        return ResponseEnvelope.success(
+            f"Journal entry from {result.data['date']}",
+            result.data
+        )
+    except Exception as e:
+        logger.error(f"Error getting journal entry: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_snapshot_config(config_name: str, config_data: dict) -> dict:
+    """Snapshot config as journal entry."""
+    try:
+        entry_id = f"jrnl_{uuid.uuid4().hex[:12]}"
+
+        content = f"Config snapshot: {config_name}\n\n```yaml\n{yaml.dump(config_data)}\n```"
+
+        entry = {
+            "entry_id": entry_id,
+            "date": date.today().isoformat(),
+            "entry_type": "milestone",
+            "content": content,
+            "tags": ["config-snapshot", config_name]
+        }
+
+        supabase.table("journal_entries").insert(entry).execute()
+
+        return ResponseEnvelope.success(
+            f"Snapshotted config: {config_name}",
+            {"entry_id": entry_id}
+        )
+    except Exception as e:
+        logger.error(f"Error snapshotting config: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+# =============================================================================
+# Document Ingestion Handlers (v1.3)
+# =============================================================================
+
+def handle_kb_ingest_doc(doc_path: str, strategy: str = "chunked", chunk_size: int = 2000,
+                         tags: List[str] = None, overwrite: bool = False) -> dict:
+    """Ingest single markdown document into KB."""
+    try:
+        doc_path = Path(doc_path).resolve()
+        if not doc_path.exists():
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Document not found: {doc_path}")
+
+        # Read document and extract frontmatter
+        processor = DocumentProcessor(chunk_size=chunk_size)
+        content, metadata = processor.read_document(str(doc_path))
+
+        # Compute hash for change detection
+        doc_hash = processor.compute_hash(content)
+
+        # Check if document already synced
+        existing_sync = supabase.table("kb_doc_sync")\
+            .select("*")\
+            .eq("doc_path", str(doc_path))\
+            .maybe_single()\
+            .execute()
+
+        if existing_sync and existing_sync.data and existing_sync.data.get('doc_hash') == doc_hash and not overwrite:
+            return ResponseEnvelope.success(
+                f"Document unchanged: {doc_path.name}",
+                {
+                    "doc_path": str(doc_path),
+                    "status": "unchanged",
+                    "doc_hash": doc_hash,
+                    "kb_ids": existing_sync.data.get('kb_ids', [])
+                }
+            )
+
+        # Delete old KB entries if overwriting
+        if overwrite and existing_sync and existing_sync.data:
+            old_kb_ids = existing_sync.data.get('kb_ids', [])
+            if old_kb_ids:
+                supabase.table("kb_entries")\
+                    .delete()\
+                    .in_("kb_id", old_kb_ids)\
+                    .execute()
+                logger.info(f"Deleted {len(old_kb_ids)} old KB entries for {doc_path.name}")
+
+        # Extract topic and title
+        topic = metadata.get('topic') or processor.extract_topic_from_path(str(doc_path))
+        base_title = processor.generate_title(content, str(doc_path))
+        doc_tags = tags or []
+        if 'tags' in metadata:
+            doc_tags.extend(metadata['tags'])
+
+        # Ingest based on strategy
+        kb_ids = []
+
+        if strategy == "full":
+            # Single KB entry for entire document
+            kb_id = f"kb_{uuid.uuid4().hex[:12]}"
+            entry = {
+                "kb_id": kb_id,
+                "topic": topic,
+                "title": base_title,
+                "content": content,
+                "tags": doc_tags,
+                "source_doc": str(doc_path),
+                "source_section": None,
+                "line_range": [1, len(content.split('\n'))]
+            }
+            supabase.table("kb_entries").insert(entry).execute()
+            kb_ids.append(kb_id)
+
+        elif strategy == "chunked":
+            # Split by sections
+            chunks = processor.chunk_by_sections(content, chunk_size)
+            for i, chunk in enumerate(chunks):
+                kb_id = f"kb_{uuid.uuid4().hex[:12]}"
+                title = f"{base_title} - {chunk.section}" if chunk.section else f"{base_title} (part {i+1})"
+                entry = {
+                    "kb_id": kb_id,
+                    "topic": topic,
+                    "title": title,
+                    "content": chunk.content,
+                    "tags": doc_tags,
+                    "source_doc": str(doc_path),
+                    "source_section": chunk.section,
+                    "line_range": [chunk.line_start, chunk.line_end]
+                }
+                supabase.table("kb_entries").insert(entry).execute()
+                kb_ids.append(kb_id)
+
+        elif strategy == "summary":
+            # TODO: Implement GPT summary strategy
+            return ResponseEnvelope.error(
+                ErrorCodes.INVALID_ARGUMENT,
+                "Summary strategy not yet implemented. Use 'full' or 'chunked'."
+            )
+
+        # Update sync tracking
+        sync_data = {
+            "doc_path": str(doc_path),
+            "doc_hash": doc_hash,
+            "kb_ids": kb_ids,
+            "last_synced_at": datetime.utcnow().isoformat(),
+            "last_modified_at": datetime.fromtimestamp(doc_path.stat().st_mtime).isoformat(),
+            "strategy": strategy,
+            "metadata": metadata
+        }
+
+        if existing_sync and existing_sync.data:
+            supabase.table("kb_doc_sync")\
+                .update(sync_data)\
+                .eq("doc_path", str(doc_path))\
+                .execute()
+            status = "updated"
+        else:
+            supabase.table("kb_doc_sync").insert(sync_data).execute()
+            status = "created"
+
+        return ResponseEnvelope.success(
+            f"Ingested {doc_path.name}: {len(kb_ids)} KB entries {status}",
+            {
+                "doc_path": str(doc_path),
+                "kb_entries_created": len(kb_ids),
+                "kb_ids": kb_ids,
+                "doc_hash": doc_hash,
+                "status": status
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error ingesting document {doc_path}: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+async def handle_kb_ingest_dir(dir_path: str, pattern: str = "*.md", strategy: str = "chunked",
+                         recursive: bool = True, exclude_patterns: List[str] = None) -> dict:
+    """Batch ingest directory (5x faster with async/await)."""
+    import asyncio
+    USE_ASYNC_INGESTION = os.getenv("ENABLE_ASYNC_INGESTION", "true").lower() == "true"
+
+    try:
+        dir_path = Path(dir_path).resolve()
+        if not dir_path.exists():
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Directory not found: {dir_path}")
+
+        # Find all matching files
+        if recursive:
+            files = list(dir_path.rglob(pattern))
+        else:
+            files = list(dir_path.glob(pattern))
+
+        # Apply exclude patterns
+        if exclude_patterns:
+            import fnmatch
+            files = [f for f in files if not any(fnmatch.fnmatch(str(f), pat) for pat in exclude_patterns)]
+
+        if not files:
+            return ResponseEnvelope.success(
+                f"No files found matching pattern: {pattern}",
+                {"processed": 0, "created": 0, "updated": 0, "unchanged": 0, "errors": []}
+            )
+
+        created = 0
+        updated = 0
+        unchanged = 0
+        errors = []
+
+        if USE_ASYNC_INGESTION:
+            # NEW: True async with asyncio.gather (5x faster, non-blocking)
+            import aiofiles
+
+            async def ingest_file_async(filepath: Path) -> dict:
+                """Async file ingestion with aiofiles."""
+                try:
+                    # Async file I/O
+                    async with aiofiles.open(filepath, 'r', encoding='utf-8') as f:
+                        content = await f.read()
+
+                    # Extract frontmatter and hash
+                    processor = DocumentProcessor(chunk_size=2000)
+                    _, metadata = processor.read_document(str(filepath))
+                    doc_hash = processor.compute_hash(content)
+
+                    # Check if document already synced
+                    existing_sync = supabase.table("kb_doc_sync")\
+                        .select("*")\
+                        .eq("doc_path", str(filepath))\
+                        .maybe_single()\
+                        .execute()
+
+                    if existing_sync and existing_sync.data and existing_sync.data.get('doc_hash') == doc_hash:
+                        return {"status": "unchanged", "doc_path": str(filepath)}
+
+                    # Ingest document (synchronous DB calls - Supabase client isn't async)
+                    result = handle_kb_ingest_doc(
+                        doc_path=str(filepath),
+                        strategy=strategy,
+                        chunk_size=2000,
+                        tags=None,
+                        overwrite=False
+                    )
+
+                    return {
+                        "status": result.get('data', {}).get('status', 'unknown'),
+                        "doc_path": str(filepath),
+                        "result": result
+                    }
+
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "doc_path": str(filepath),
+                        "error": str(e)
+                    }
+
+            # Process files concurrently with asyncio.gather
+            import time
+            start = time.perf_counter()
+
+            results = await asyncio.gather(*[ingest_file_async(f) for f in files])
+
+            duration_s = time.perf_counter() - start
+            logger.info(f"Async ingestion completed in {duration_s:.2f}s")
+
+            # Aggregate results
+            for res in results:
+                status = res.get("status")
+                if status == "created":
+                    created += 1
+                elif status == "updated":
+                    updated += 1
+                elif status == "unchanged":
+                    unchanged += 1
+                elif status == "error":
+                    errors.append({
+                        "doc_path": res.get("doc_path"),
+                        "error": "ingestion_error",
+                        "message": res.get("error")
+                    })
+        else:
+            # OLD: ThreadPoolExecutor (fallback for testing)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_file = {
+                    executor.submit(handle_kb_ingest_doc, str(f), strategy): f
+                    for f in files
+                }
+
+                for future in as_completed(future_to_file):
+                    file_path = future_to_file[future]
+                    try:
+                        result = future.result()
+                        if result.get('ok'):
+                            status = result.get('data', {}).get('status')
+                            if status == 'created':
+                                created += 1
+                            elif status == 'updated':
+                                updated += 1
+                            elif status == 'unchanged':
+                                unchanged += 1
+                        else:
+                            errors.append({
+                                "doc_path": str(file_path),
+                                "error": result.get('error'),
+                                "message": result.get('message')
+                            })
+                    except Exception as e:
+                        errors.append({
+                            "doc_path": str(file_path),
+                            "error": "unexpected_exception",
+                            "message": str(e)
+                        })
+
+        return ResponseEnvelope.success(
+            f"Processed {len(files)} files: {created} created, {updated} updated, {unchanged} unchanged",
+            {
+                "processed": len(files),
+                "created": created,
+                "updated": updated,
+                "unchanged": unchanged,
+                "errors": errors
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error ingesting directory {dir_path}: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kb_sync_status(dir_path: str) -> dict:
+    """Check sync state between source docs and KB."""
+    try:
+        dir_path = Path(dir_path).resolve()
+        if not dir_path.exists():
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Directory not found: {dir_path}")
+
+        # Get all markdown files in directory
+        md_files = list(dir_path.rglob("*.md"))
+        md_paths = {str(f.resolve()): f for f in md_files}
+
+        # Get all sync records
+        sync_records = supabase.table("kb_doc_sync")\
+            .select("*")\
+            .execute()
+
+        synced_paths = {r['doc_path']: r for r in sync_records.data}
+
+        # Classify files
+        synced = 0
+        modified = 0
+        new = 0
+        details = []
+
+        for path_str, path_obj in md_paths.items():
+            if path_str in synced_paths:
+                sync_rec = synced_paths[path_str]
+                file_mtime = datetime.fromtimestamp(path_obj.stat().st_mtime)
+                last_synced = datetime.fromisoformat(sync_rec['last_modified_at'].replace('Z', '+00:00'))
+
+                if file_mtime > last_synced:
+                    modified += 1
+                    status = "modified"
+                else:
+                    synced += 1
+                    status = "synced"
+
+                details.append({
+                    "doc_path": path_str,
+                    "status": status,
+                    "last_synced": sync_rec['last_synced_at'],
+                    "doc_modified": file_mtime.isoformat(),
+                    "kb_ids": sync_rec['kb_ids']
+                })
+            else:
+                new += 1
+                details.append({
+                    "doc_path": path_str,
+                    "status": "new",
+                    "last_synced": None,
+                    "doc_modified": datetime.fromtimestamp(path_obj.stat().st_mtime).isoformat(),
+                    "kb_ids": []
+                })
+
+        # Find orphaned KB entries (source doc deleted)
+        orphaned_kb_ids = []
+        for sync_path, sync_rec in synced_paths.items():
+            if sync_path not in md_paths:
+                orphaned_kb_ids.extend(sync_rec['kb_ids'])
+
+        return ResponseEnvelope.success(
+            f"Sync status: {synced} synced, {modified} modified, {new} new, {len(orphaned_kb_ids)} orphaned",
+            {
+                "total_docs": len(md_files),
+                "synced": synced,
+                "modified": modified,
+                "new": new,
+                "orphaned_kb_entries": len(orphaned_kb_ids),
+                "details": details
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error checking sync status: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_kb_link_to_source(kb_id: str) -> dict:
+    """Get source document reference for a KB entry."""
+    try:
+        # Get KB entry
+        entry = supabase.table("kb_entries")\
+            .select("*")\
+            .eq("kb_id", kb_id)\
+            .maybe_single()\
+            .execute()
+
+        if not entry or not entry.data:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"KB entry not found: {kb_id}")
+
+        source_doc = entry.data.get('source_doc')
+        if not source_doc:
+            return ResponseEnvelope.success(
+                f"KB entry {kb_id} has no source document",
+                {
+                    "kb_id": kb_id,
+                    "source_doc": None,
+                    "source_section": None,
+                    "line_range": None,
+                    "last_synced": None,
+                    "doc_exists": False
+                }
+            )
+
+        # Get sync record
+        sync_rec = supabase.table("kb_doc_sync")\
+            .select("*")\
+            .eq("doc_path", source_doc)\
+            .maybe_single()\
+            .execute()
+
+        # Check if source file still exists
+        doc_exists = Path(source_doc).exists()
+
+        return ResponseEnvelope.success(
+            f"Source: {Path(source_doc).name}",
+            {
+                "kb_id": kb_id,
+                "source_doc": source_doc,
+                "source_section": entry.data.get('source_section'),
+                "line_range": entry.data.get('line_range'),
+                "last_synced": sync_rec.data.get('last_synced_at') if sync_rec and sync_rec.data else None,
+                "doc_exists": doc_exists
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error linking KB to source: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+# =============================================================================
+# MCP Index Handlers
+# =============================================================================
+
+def handle_mcp_index_scan(triggered_by: str = "manual") -> dict:
+    """Scan all MCP servers and index their tools."""
+    try:
+        scanner = MCPIndexScanner(supabase)
+        result = scanner.scan_all_servers(triggered_by=triggered_by)
+
+        return ResponseEnvelope.success(
+            f"Scanned {result['servers_scanned']} servers, indexed {result['tools_indexed']} tools",
+            result
+        )
+
+    except Exception as e:
+        logger.error(f"Error scanning MCP index: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_mcp_index_search(query: str, category: str = None, limit: int = 20) -> dict:
+    """Search for MCP tools by description/capability."""
+    try:
+        scanner = MCPIndexScanner(supabase)
+        results = scanner.search_tools(query, category, limit)
+
+        # Auto re-index watchdog: if results are empty, check if index is stale
+        re_index_triggered = False
+        if len(results) == 0:
+            # Query last scan time from mcp_index_versions
+            try:
+                last_scan_result = supabase.table("mcp_index_versions")\
+                    .select("scan_time")\
+                    .order("scan_time", desc=True)\
+                    .limit(1)\
+                    .execute()
+
+                if last_scan_result.data and len(last_scan_result.data) > 0:
+                    last_scan_time = datetime.fromisoformat(last_scan_result.data[0]["scan_time"].replace("Z", "+00:00"))
+                    time_since_scan = (datetime.now(last_scan_time.tzinfo) - last_scan_time).total_seconds()
+
+                    # If stale (>1 hour = 3600 seconds), trigger background re-index
+                    if time_since_scan > 3600:
+                        logger.info(f"MCP Index stale ({time_since_scan/3600:.1f}h old), triggering background re-index")
+
+                        # Launch background re-index using threading
+                        def background_reindex():
+                            try:
+                                scanner_bg = MCPIndexScanner(supabase)
+                                result = scanner_bg.scan_all_servers(triggered_by="auto_watchdog")
+                                logger.info(f"Auto re-index complete: {result['servers_scanned']} servers, {result['tools_indexed']} tools")
+                            except Exception as e:
+                                logger.error(f"Background re-index failed: {e}", exc_info=True)
+
+                        thread = threading.Thread(target=background_reindex, daemon=True)
+                        thread.start()
+                        re_index_triggered = True
+                else:
+                    # No scan history found, trigger initial scan
+                    logger.info("No MCP Index scan history found, triggering initial background scan")
+
+                    def background_reindex():
+                        try:
+                            scanner_bg = MCPIndexScanner(supabase)
+                            result = scanner_bg.scan_all_servers(triggered_by="auto_watchdog_initial")
+                            logger.info(f"Initial auto scan complete: {result['servers_scanned']} servers, {result['tools_indexed']} tools")
+                        except Exception as e:
+                            logger.error(f"Background initial scan failed: {e}", exc_info=True)
+
+                    thread = threading.Thread(target=background_reindex, daemon=True)
+                    thread.start()
+                    re_index_triggered = True
+
+            except Exception as e:
+                logger.warning(f"Failed to check MCP Index staleness: {e}")
+
+        # Build response with re-index metadata
+        response_data = {
+            "results": results,
+            "query": query,
+            "category": category,
+            "re_index_triggered": re_index_triggered
+        }
+
+        message = f"Found {len(results)} tools matching '{query}'"
+        if re_index_triggered:
+            message += " (re-index triggered in background, retry in 30 seconds)"
+
+        return ResponseEnvelope.success(message, response_data)
+
+    except Exception as e:
+        logger.error(f"Error searching MCP index: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_mcp_index_get_server(server_id: str) -> dict:
+    """Get all tools for a specific MCP server."""
+    try:
+        scanner = MCPIndexScanner(supabase)
+        result = scanner.get_server_tools(server_id)
+
+        if not result:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Server not found: {server_id}")
+
+        server = result["server"]
+        tools = result["tools"]
+
+        return ResponseEnvelope.success(
+            f"Server {server_id} has {len(tools)} tools",
+            {"server": server, "tools": tools}
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting server tools: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_mcp_index_get_tool(tool_name: str) -> dict:
+    """Get detailed information about a specific tool."""
+    try:
+        scanner = MCPIndexScanner(supabase)
+        tool = scanner.get_tool_details(tool_name)
+
+        if not tool:
+            return ResponseEnvelope.error(ErrorCodes.NOT_FOUND, f"Tool not found: {tool_name}")
+
+        return ResponseEnvelope.success(
+            f"Found tool: {tool['full_name']}",
+            {"tool": tool}
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting tool details: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_mcp_index_rebuild() -> dict:
+    """Force rebuild of entire MCP index."""
+    try:
+        scanner = MCPIndexScanner(supabase)
+        result = scanner.scan_all_servers(triggered_by="rebuild")
+
+        return ResponseEnvelope.success(
+            f"Rebuilt index: {result['servers_scanned']} servers, {result['tools_indexed']} tools",
+            result
+        )
+
+    except Exception as e:
+        logger.error(f"Error rebuilding MCP index: {e}", exc_info=True)
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def main():
+    """Run the MCP server."""
+    import asyncio
+    global SUPABASE_URL, SUPABASE_KEY, supabase
+
+    # Initialize Supabase configuration
+    SUPABASE_URL = require_env("SUPABASE_URL")
+    SUPABASE_KEY = require_env("SUPABASE_KEY")
+
+    # Initialize Supabase client with connection pooling
+    supabase = get_supabase_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info(f"Connected to Supabase at {SUPABASE_URL}")
+
+    logger.info("Starting knowledge-mcp server (Supabase backend)")
+
+    async def _run():
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(read_stream, write_stream, app.create_initialization_options())
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    main()

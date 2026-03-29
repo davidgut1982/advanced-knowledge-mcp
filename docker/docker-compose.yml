@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  knowledge-mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: knowledge-mcp
+    environment:
+      # Database configuration
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-knowledge123}@postgres:5432/knowledge
+
+      # Knowledge MCP configuration
+      - KNOWLEDGE_DATA_DIR=/data/knowledge
+      - KNOWLEDGE_LOG_LEVEL=INFO
+
+      # Optional: Supabase configuration (comment out if using local PostgreSQL)
+      # - SUPABASE_URL=your_supabase_url
+      # - SUPABASE_ANON_KEY=your_supabase_anon_key
+
+    volumes:
+      - knowledge_data:/data
+      - ./logs:/data/logs
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - knowledge-net
+
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: knowledge-postgres
+    environment:
+      - POSTGRES_DB=knowledge
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-knowledge123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - knowledge-net
+
+  # Optional: Adminer for database management
+  adminer:
+    image: adminer
+    container_name: knowledge-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    networks:
+      - knowledge-net
+    profiles:
+      - dev
+
+volumes:
+  knowledge_data:
+  postgres_data:
+
+networks:
+  knowledge-net:
+    driver: bridge

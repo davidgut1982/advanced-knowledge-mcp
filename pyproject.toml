@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowledge-mcp"
+version = "0.3.0"
+description = "Knowledge management MCP server (KB + research + journal + doc ingestion + MCP index)"
+dependencies = [
+    "mcp",
+    "sentry-sdk",
+    "pyyaml",
+    "supabase",
+    "python-dotenv",
+    "python-frontmatter",
+    "markdown",
+    "tiktoken",
+    "aiofiles>=23.2.1",
+    "psycopg2-binary",  # Required for local PostgreSQL backend
+]
+
+[project.scripts]
+knowledge-mcp = "knowledge_mcp.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}

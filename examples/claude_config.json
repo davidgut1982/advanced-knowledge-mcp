@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "knowledge-mcp": {
+      "command": "knowledge-mcp",
+      "env": {
+        "DATABASE_URL": "postgresql://postgres:password@localhost:5432/knowledge",
+        "KNOWLEDGE_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
