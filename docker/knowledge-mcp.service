@@ -1,0 +1,38 @@
+[Unit]
+Description=Knowledge MCP Server
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/opt/knowledge-mcp
+Environment="PYTHONPATH=/opt/knowledge-mcp/shared"
+Environment="DB_BACKEND=local"
+Environment="DB_HOST=localhost"
+Environment="DB_PORT=5432"
+Environment="DB_NAME=mmp_system"
+Environment="DB_USER=latvian_user"
+Environment="DB_PASSWORD=latvian_dev_password_2026"
+Environment="KNOWLEDGE_DATA_DIR=/opt/knowledge-mcp/data"
+EnvironmentFile=/opt/knowledge-mcp/.env
+ExecStart=/opt/knowledge-mcp/venv/bin/python shared/mcp_http_wrapper_sse.py --module knowledge_mcp.server --port 5555 --host 0.0.0.0
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=60
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/knowledge-mcp/data
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=knowledge-mcp
+
+[Install]
+WantedBy=multi-user.target
