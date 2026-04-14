@@ -37,11 +37,9 @@ from mcp import types
 from .doc_processor import DocumentProcessor
 from .mcp_index_scanner import MCPIndexScanner
 
-# Add shared utilities to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent / "shared"))
-from response import ResponseEnvelope, ErrorCodes
-from env_config import get_env, require_env
-from db_client import get_db_client, DatabaseBackend
+from .response import ResponseEnvelope, ErrorCodes
+from .env_config import get_env, require_env
+from .db_client import get_db_client, DatabaseBackend
 
 # Initialize logging
 logging.basicConfig(
