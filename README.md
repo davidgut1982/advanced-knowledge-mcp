@@ -37,7 +37,7 @@ Traditional KB MCP:     Knowledge-MCP:
 | **Research** | Basic search | Full research workflow with experiments |
 | **Sync** | Manual updates | Auto-detection with SHA-256 hashing |
 | **Linking** | Text references | Bidirectional source ↔ KB linking |
-| **Backends** | JSON files only | PostgreSQL + Supabase + JSON fallback |
+| **Backends** | Single option | PostgreSQL + Supabase + SQLite |
 | **Intelligence** | Static storage | Document ingestion with chunking strategies |
 
 ## ⚡ Quick Start
@@ -75,24 +75,46 @@ cp .env.example .env
 # Edit SUPABASE_URL and SUPABASE_KEY
 ```
 
-**Option C: JSON Files (Local Development)**
+**Option C: SQLite (Local Development / Work Machines)**
 ```bash
-# No setup needed - auto-creates JSON storage
-export KNOWLEDGE_DATA_DIR=/path/to/data
+# No setup needed - auto-creates a single .db file
+export DB_BACKEND=sqlite
+export KNOWLEDGE_DATA_DIR=/path/to/data  # optional, defaults to ./knowledge-data
 ```
 
 ### 3. Claude Code Integration
 
 Add to your Claude Code MCP configuration:
 
+**PostgreSQL:**
 ```json
 {
   "mcpServers": {
     "knowledge-mcp": {
       "command": "knowledge-mcp",
       "env": {
-        "DATABASE_URL": "postgresql://user:pass@localhost/knowledge",
+        "DB_BACKEND": "local",
+        "DB_HOST": "localhost",
+        "DB_PORT": "5432",
+        "DB_NAME": "mmp_system",
+        "DB_USER": "your_user",
+        "DB_PASSWORD": "your_password",
         "KNOWLEDGE_DATA_DIR": "/opt/knowledge-data"
+      }
+    }
+  }
+}
+```
+
+**SQLite (no database server needed):**
+```json
+{
+  "mcpServers": {
+    "knowledge-mcp": {
+      "command": "knowledge-mcp",
+      "env": {
+        "DB_BACKEND": "sqlite",
+        "KNOWLEDGE_DATA_DIR": "/path/to/knowledge-data"
       }
     }
   }
@@ -158,11 +180,11 @@ kb_link_to_source(kb_id="kb_123")  # Find source document
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   PostgreSQL    │    │    Supabase     │    │   JSON Files    │
-│   + pgvector     │    │   (Cloud)       │    │   (Fallback)    │
+│   PostgreSQL    │    │    Supabase     │    │    SQLite       │
+│   (Recommended) │    │   (Cloud)       │    │   (Local Dev)   │
 │                 │    │                 │    │                 │
-│ • Best perf     │    │ • Zero setup    │    │ • Local dev     │
-│ • Full features │    │ • Managed       │    │ • No deps       │
+│ • Best perf     │    │ • Zero setup    │    │ • No server     │
+│ • Full features │    │ • Managed       │    │ • Single file   │
 │ • Self-hosted   │    │ • Scalable      │    │ • Portable      │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
         │                       │                       │
