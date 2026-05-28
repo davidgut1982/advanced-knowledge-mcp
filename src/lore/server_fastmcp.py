@@ -179,6 +179,7 @@ mcp: FastMCP = FastMCP("lore", version=_PACKAGE_VERSION, lifespan=lore_lifespan)
 # -32603. Param sets mirror the function signatures below verbatim.
 _STRICT_TOOL_PARAMS: dict[str, frozenset[str]] = {
     "kb_list": frozenset({"topic", "limit", "offset"}),
+    "kb_get_batch": frozenset({"kb_ids"}),
     "investigation_list": frozenset({"topic"}),
     "journal_list": frozenset({"limit"}),
     "investigation_list_experiments": frozenset(),
@@ -301,6 +302,16 @@ def kb_search(
 @mcp.tool(description="Get full KB entry by ID")
 def kb_get(kb_id: str) -> str:
     return _json(_srv.handle_kb_get(kb_id=kb_id))
+
+
+@mcp.tool(
+    description=(
+        "Fetch full content for multiple KB entries by ID. Use after kb_search "
+        "to retrieve content without N+1 round trips."
+    )
+)
+def kb_get_batch(kb_ids: list[str]) -> str:
+    return _json(_srv.handle_kb_get_batch(kb_ids=kb_ids))
 
 
 @mcp.tool(description="List KB entries")

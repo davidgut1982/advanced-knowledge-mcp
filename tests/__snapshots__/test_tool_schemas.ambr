@@ -1010,6 +1010,39 @@
     }),
   })
 # ---
+# name: test_tool_schema_snapshot[kb_get_batch]
+  dict({
+    'description': 'Fetch full content for multiple KB entries by ID. Use after kb_search to retrieve content without N+1 round trips.',
+    'inputSchema': dict({
+      'additionalProperties': False,
+      'properties': dict({
+        'kb_ids': dict({
+          'items': dict({
+            'type': 'string',
+          }),
+          'type': 'array',
+        }),
+      }),
+      'required': list([
+        'kb_ids',
+      ]),
+      'type': 'object',
+    }),
+    'name': 'kb_get_batch',
+    'outputSchema': dict({
+      'properties': dict({
+        'result': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'result',
+      ]),
+      'type': 'object',
+      'x-fastmcp-wrap-result': True,
+    }),
+  })
+# ---
 # name: test_tool_schema_snapshot[kb_ingest_dir]
   dict({
     'description': 'Batch ingest directory of markdown files',
