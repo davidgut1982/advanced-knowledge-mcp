@@ -41,25 +41,10 @@
 # ---
 # name: test_tool_schema_snapshot[cluster_results]
   dict({
-    'description': 'Cluster search results by topic/source type',
+    'description': 'Groups search results by source_type (file extension, corpus, transcript). The cluster count is determined by the data, not by a parameter — Issue #22 removed the previously-misleading num_clusters/n_clusters knobs.',
     'inputSchema': dict({
       'additionalProperties': False,
       'properties': dict({
-        'n_clusters': dict({
-          'anyOf': list([
-            dict({
-              'type': 'integer',
-            }),
-            dict({
-              'type': 'null',
-            }),
-          ]),
-          'default': None,
-        }),
-        'num_clusters': dict({
-          'default': 5,
-          'type': 'integer',
-        }),
         'results': dict({
           'items': dict({
             'additionalProperties': True,
@@ -349,6 +334,82 @@
     }),
   })
 # ---
+# name: test_tool_schema_snapshot[investigation_delete_experiment]
+  dict({
+    'description': 'Hard-delete an investigation experiment by experiment_id (Issue #21). Requires confirm=True; in LORE_ENV=production also requires confirm_production=True.',
+    'inputSchema': dict({
+      'additionalProperties': False,
+      'properties': dict({
+        'confirm': dict({
+          'default': False,
+          'type': 'boolean',
+        }),
+        'confirm_production': dict({
+          'default': False,
+          'type': 'boolean',
+        }),
+        'experiment_id': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'experiment_id',
+      ]),
+      'type': 'object',
+    }),
+    'name': 'investigation_delete_experiment',
+    'outputSchema': dict({
+      'properties': dict({
+        'result': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'result',
+      ]),
+      'type': 'object',
+      'x-fastmcp-wrap-result': True,
+    }),
+  })
+# ---
+# name: test_tool_schema_snapshot[investigation_delete_note]
+  dict({
+    'description': 'Hard-delete an investigation note by note_id (Issue #21). Requires confirm=True; in LORE_ENV=production also requires confirm_production=True.',
+    'inputSchema': dict({
+      'additionalProperties': False,
+      'properties': dict({
+        'confirm': dict({
+          'default': False,
+          'type': 'boolean',
+        }),
+        'confirm_production': dict({
+          'default': False,
+          'type': 'boolean',
+        }),
+        'note_id': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'note_id',
+      ]),
+      'type': 'object',
+    }),
+    'name': 'investigation_delete_note',
+    'outputSchema': dict({
+      'properties': dict({
+        'result': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'result',
+      ]),
+      'type': 'object',
+      'x-fastmcp-wrap-result': True,
+    }),
+  })
+# ---
 # name: test_tool_schema_snapshot[investigation_get]
   dict({
     'description': 'Get a single investigation entry by ID',
@@ -556,6 +617,44 @@
       'type': 'object',
     }),
     'name': 'journal_append',
+    'outputSchema': dict({
+      'properties': dict({
+        'result': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'result',
+      ]),
+      'type': 'object',
+      'x-fastmcp-wrap-result': True,
+    }),
+  })
+# ---
+# name: test_tool_schema_snapshot[journal_delete]
+  dict({
+    'description': 'Hard-delete a journal entry by entry_id (Issue #21). Requires confirm=True; in LORE_ENV=production also requires confirm_production=True.',
+    'inputSchema': dict({
+      'additionalProperties': False,
+      'properties': dict({
+        'confirm': dict({
+          'default': False,
+          'type': 'boolean',
+        }),
+        'confirm_production': dict({
+          'default': False,
+          'type': 'boolean',
+        }),
+        'entry_id': dict({
+          'type': 'string',
+        }),
+      }),
+      'required': list([
+        'entry_id',
+      ]),
+      'type': 'object',
+    }),
+    'name': 'journal_delete',
     'outputSchema': dict({
       'properties': dict({
         'result': dict({

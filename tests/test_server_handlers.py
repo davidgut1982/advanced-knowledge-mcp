@@ -461,6 +461,91 @@ def test_multi_search_description_updated():
 
 
 # ---------------------------------------------------------------------------
+# Issue #20: multi_search must surface the same KB results that a direct
+# kb_search call returns for the same query (regression guard).
+# ---------------------------------------------------------------------------
+
+
+def test_multi_search_kb_path_returns_same_results_as_kb_search(monkeypatch):
+    """multi_search.knowledge.kb_entries == kb_search.data.results for one query.
+
+    Issue #20 — QA reported that multi_search returns 0 KB results while
+    kb_search returns the same KB entries for the same query. This pins down
+    the contract: the multi_search subpath calls handle_kb_search verbatim and
+    forwards data.results into knowledge.kb_entries with no filtering.
+    """
+
+    class _Q:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def or_(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            from lore.db_client import QueryResult
+
+            return QueryResult(data=self._rows)
+
+    class _Db:
+        vec_extension_loaded = False
+        fts5_available = False
+
+        def __init__(self, rows):
+            self._rows = rows
+
+        def table(self, _name):
+            return _Q(self._rows)
+
+    rows = [
+        {
+            "kb_id": "kb_photo",
+            "title": "Photosynthesis quantum effects",
+            "topic": "biology",
+            "trust_score": 1.0,
+        },
+        {
+            "kb_id": "kb_other",
+            "title": "Quantum tunnelling overview",
+            "topic": "physics",
+            "trust_score": 1.0,
+        },
+    ]
+    monkeypatch.setattr(srv, "db", _Db(rows))
+    # Disable mining so telemetry side-effects are no-ops in this unit test.
+    import lore.telemetry as tel
+
+    monkeypatch.setattr(tel, "mining_enabled", lambda: False)
+    # Ensure we hit the legacy lexical path (no Postgres FTS, no embeddings).
+    monkeypatch.delenv("DB_BACKEND", raising=False)
+    monkeypatch.delenv("LORE_SEMANTIC_SEARCH", raising=False)
+
+    direct = srv.handle_kb_search(query="photosynthesis quantum")
+    via_multi = srv.handle_multi_search(query="photosynthesis quantum")
+
+    assert direct["ok"] is True
+    assert via_multi["ok"] is True
+
+    direct_ids = [r["kb_id"] for r in direct["data"]["results"]]
+    multi_ids = [r["kb_id"] for r in via_multi["data"]["results"]["knowledge"]["kb_entries"]]
+
+    # Must surface the same KB ids in the same order, with the same count.
+    assert multi_ids == direct_ids
+    assert len(multi_ids) == len(rows)
+    # And the kb_entries field is never silently empty when kb_search has matches.
+    assert via_multi["data"]["results"]["knowledge"]["kb_entries"]
+
+
+# ---------------------------------------------------------------------------
 # BUG-6: kb_sync_status dir_path optional with env-var fallback
 # ---------------------------------------------------------------------------
 
@@ -1257,3 +1342,245 @@ def test_fastmcp_middleware_allows_known_kwargs(monkeypatch):
     assert envelope["ok"] is True
     assert captured["topic"] == "x"
     assert captured["limit"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Issue #21: journal_delete + investigation_delete_note +
+#            investigation_delete_experiment.
+#
+# Each new destructive tool follows the kb_delete safety contract:
+#   * confirm=True is mandatory; missing it returns a clean invalid_input
+#   * LORE_ENV=production additionally requires confirm_production=True
+#   * unknown IDs return not_found (never raise)
+# ---------------------------------------------------------------------------
+
+
+class _DeleteDb:
+    """Tiny fluent fake supporting select/maybe_single/execute + delete/eq/execute.
+
+    Distinct from ``_FakeDb`` because the delete handlers do not perform an
+    update step. Construct with the row to return on read (or None for "missing").
+    """
+
+    def __init__(self, current_row=None):
+        self.current_row = current_row
+        self.deleted = False
+        self._in_delete = False
+
+    def table(self, _name):
+        return self
+
+    def select(self, *_a, **_k):
+        self._in_delete = False
+        return self
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def delete(self):
+        self._in_delete = True
+        self.deleted = True
+        return self
+
+    def execute(self):
+        if self._in_delete:
+            return QueryResult(data={})
+        return QueryResult(data=self.current_row)
+
+
+# ---- journal_delete -------------------------------------------------------
+
+
+def test_journal_delete_success(monkeypatch):
+    """confirm=True + existing entry → ok=True with deleted=True."""
+    monkeypatch.setenv("LORE_ENV", "development")
+    fake = _DeleteDb(current_row={"entry_id": "jrnl_1", "content": "x"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_journal_delete(entry_id="jrnl_1", confirm=True)
+    assert resp["ok"] is True
+    assert resp["data"]["entry_id"] == "jrnl_1"
+    assert resp["data"]["deleted"] is True
+    assert fake.deleted is True
+
+
+def test_journal_delete_missing_confirm_returns_invalid_input(monkeypatch):
+    """confirm=False (default) → invalid_input, no DB touch."""
+    fake = _DeleteDb(current_row={"entry_id": "jrnl_1"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_journal_delete(entry_id="jrnl_1")
+    assert resp["ok"] is False
+    assert resp["error"] == "invalid_input"
+    assert "confirm=True" in resp["message"]
+    assert fake.deleted is False
+
+
+def test_journal_delete_not_found(monkeypatch):
+    """Missing row → not_found envelope, no raise."""
+    monkeypatch.setenv("LORE_ENV", "development")
+    fake = _DeleteDb(current_row=None)
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_journal_delete(entry_id="jrnl_nope", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "not_found"
+    assert "jrnl_nope" in resp["message"]
+
+
+def test_journal_delete_production_guard(monkeypatch):
+    """LORE_ENV=production + confirm=True but confirm_production=False → blocked."""
+    monkeypatch.setenv("LORE_ENV", "production")
+    fake = _DeleteDb(current_row={"entry_id": "jrnl_1"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_journal_delete(entry_id="jrnl_1", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "production_guard"
+    assert fake.deleted is False
+
+    # And lifts when confirm_production=True is provided.
+    resp_ok = srv.handle_journal_delete(entry_id="jrnl_1", confirm=True, confirm_production=True)
+    assert resp_ok["ok"] is True
+    assert fake.deleted is True
+
+
+def test_journal_delete_missing_entry_id(monkeypatch):
+    """No entry_id → invalid_input."""
+    monkeypatch.setenv("LORE_ENV", "development")
+    monkeypatch.setattr(srv, "db", _DeleteDb())
+    resp = srv.handle_journal_delete(entry_id="", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "invalid_input"
+    assert "entry_id" in resp["message"]
+
+
+# ---- investigation_delete_note --------------------------------------------
+
+
+def test_investigation_delete_note_success(monkeypatch):
+    monkeypatch.setenv("LORE_ENV", "development")
+    fake = _DeleteDb(current_row={"note_id": "note_1", "title": "t"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_investigation_delete_note(note_id="note_1", confirm=True)
+    assert resp["ok"] is True
+    assert resp["data"]["note_id"] == "note_1"
+    assert resp["data"]["deleted"] is True
+    assert fake.deleted is True
+
+
+def test_investigation_delete_note_missing_confirm(monkeypatch):
+    fake = _DeleteDb(current_row={"note_id": "note_1"})
+    monkeypatch.setattr(srv, "db", fake)
+    resp = srv.handle_investigation_delete_note(note_id="note_1")
+    assert resp["ok"] is False
+    assert resp["error"] == "invalid_input"
+    assert "confirm=True" in resp["message"]
+    assert fake.deleted is False
+
+
+def test_investigation_delete_note_not_found(monkeypatch):
+    monkeypatch.setenv("LORE_ENV", "development")
+    monkeypatch.setattr(srv, "db", _DeleteDb(current_row=None))
+    resp = srv.handle_investigation_delete_note(note_id="note_nope", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "not_found"
+    assert "note_nope" in resp["message"]
+
+
+def test_investigation_delete_note_production_guard(monkeypatch):
+    monkeypatch.setenv("LORE_ENV", "production")
+    fake = _DeleteDb(current_row={"note_id": "note_1"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_investigation_delete_note(note_id="note_1", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "production_guard"
+    assert fake.deleted is False
+
+    resp_ok = srv.handle_investigation_delete_note(
+        note_id="note_1", confirm=True, confirm_production=True
+    )
+    assert resp_ok["ok"] is True
+    assert fake.deleted is True
+
+
+# ---- investigation_delete_experiment --------------------------------------
+
+
+def test_investigation_delete_experiment_success(monkeypatch):
+    monkeypatch.setenv("LORE_ENV", "development")
+    fake = _DeleteDb(current_row={"experiment_id": "exp_1", "title": "t"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_investigation_delete_experiment(experiment_id="exp_1", confirm=True)
+    assert resp["ok"] is True
+    assert resp["data"]["experiment_id"] == "exp_1"
+    assert resp["data"]["deleted"] is True
+    assert fake.deleted is True
+
+
+def test_investigation_delete_experiment_missing_confirm(monkeypatch):
+    fake = _DeleteDb(current_row={"experiment_id": "exp_1"})
+    monkeypatch.setattr(srv, "db", fake)
+    resp = srv.handle_investigation_delete_experiment(experiment_id="exp_1")
+    assert resp["ok"] is False
+    assert resp["error"] == "invalid_input"
+    assert "confirm=True" in resp["message"]
+    assert fake.deleted is False
+
+
+def test_investigation_delete_experiment_not_found(monkeypatch):
+    monkeypatch.setenv("LORE_ENV", "development")
+    monkeypatch.setattr(srv, "db", _DeleteDb(current_row=None))
+    resp = srv.handle_investigation_delete_experiment(experiment_id="exp_nope", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "not_found"
+    assert "exp_nope" in resp["message"]
+
+
+def test_investigation_delete_experiment_production_guard(monkeypatch):
+    monkeypatch.setenv("LORE_ENV", "production")
+    fake = _DeleteDb(current_row={"experiment_id": "exp_1"})
+    monkeypatch.setattr(srv, "db", fake)
+
+    resp = srv.handle_investigation_delete_experiment(experiment_id="exp_1", confirm=True)
+    assert resp["ok"] is False
+    assert resp["error"] == "production_guard"
+    assert fake.deleted is False
+
+    resp_ok = srv.handle_investigation_delete_experiment(
+        experiment_id="exp_1", confirm=True, confirm_production=True
+    )
+    assert resp_ok["ok"] is True
+    assert fake.deleted is True
+
+
+# ---- schema sanity --------------------------------------------------------
+
+
+def test_new_delete_tools_registered():
+    """All three new delete tools live in the canonical tool definition list."""
+    names = {t.name for t in srv._TOOL_DEFINITIONS}
+    assert "journal_delete" in names
+    assert "investigation_delete_note" in names
+    assert "investigation_delete_experiment" in names
+
+
+def test_new_delete_tools_schema_shape():
+    """Schemas declare the right required field and confirm/confirm_production props."""
+    expected = {
+        "journal_delete": "entry_id",
+        "investigation_delete_note": "note_id",
+        "investigation_delete_experiment": "experiment_id",
+    }
+    for tool_name, id_field in expected.items():
+        schema = srv._TOOL_SCHEMA_MAP[tool_name]
+        assert schema["required"] == [id_field]
+        assert id_field in schema["properties"]
+        assert "confirm" in schema["properties"]
+        assert "confirm_production" in schema["properties"]
