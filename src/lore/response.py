@@ -68,3 +68,7 @@ class ErrorCodes:
     NONZERO_EXIT = "nonzero_exit"
     TIMEOUT = "timeout"
     FORBIDDEN = "forbidden"
+    # Emitted by kb_get_batch when the input list exceeds the per-call cap
+    # (currently 50). Separate from INVALID_INPUT so callers can distinguish
+    # "wrong shape" from "too large" and trim/chunk accordingly.
+    TOO_MANY_IDS = "too_many_ids"

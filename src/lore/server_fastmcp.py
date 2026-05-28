@@ -35,7 +35,7 @@ import logging
 import os
 import warnings
 from contextlib import asynccontextmanager
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import mcp.types as mt
 from fastmcp import FastMCP
@@ -47,6 +47,7 @@ from fastmcp.server.middleware.middleware import (
     Middleware as MCPMiddleware,
 )
 from fastmcp.tools import ToolResult
+from pydantic import Field
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
@@ -310,7 +311,14 @@ def kb_get(kb_id: str) -> str:
         "to retrieve content without N+1 round trips."
     )
 )
-def kb_get_batch(kb_ids: list[str]) -> str:
+def kb_get_batch(
+    # max_length mirrors handle_kb_get_batch's _KB_GET_BATCH_MAX cap (50) so
+    # FastMCP clients see the same size constraint as the manual JSON-Schema
+    # surface in lore.server._TOOL_DEFINITIONS. No min_length: the handler
+    # treats an empty list as a valid no-op (returns {entries:[], found:0}),
+    # so both schemas intentionally allow zero-length input.
+    kb_ids: Annotated[list[str], Field(max_length=50)],
+) -> str:
     return _json(_srv.handle_kb_get_batch(kb_ids=kb_ids))
 
 

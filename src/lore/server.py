@@ -404,8 +404,7 @@ _TOOL_DEFINITIONS = [
                 "kb_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of KB entry IDs (1–50). Missing IDs return None at the same index.",
-                    "minItems": 1,
+                    "description": "List of KB entry IDs (0–50). Missing IDs return None at the same index. An empty list is a valid no-op.",
                     "maxItems": 50,
                 },
             },
@@ -2420,7 +2419,7 @@ def handle_kb_get_batch(kb_ids: list[str]) -> dict:
 
     if len(kb_ids) > _KB_GET_BATCH_MAX:
         return ResponseEnvelope.error(
-            "too_many_ids",
+            ErrorCodes.TOO_MANY_IDS,
             f"Maximum {_KB_GET_BATCH_MAX} IDs per call, got {len(kb_ids)}",
         )
 
