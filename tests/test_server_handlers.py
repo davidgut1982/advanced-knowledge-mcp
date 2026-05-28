@@ -1360,14 +1360,21 @@ class _DeleteDb:
 
     Distinct from ``_FakeDb`` because the delete handlers do not perform an
     update step. Construct with the row to return on read (or None for "missing").
+
+    ``last_table`` records the most-recent table name passed to ``table()``,
+    allowing success tests to assert the handler targeted the correct table.
+    This catches copy-paste bugs where a handler accidentally calls the wrong
+    ``db.table(...)`` string.
     """
 
     def __init__(self, current_row=None):
         self.current_row = current_row
         self.deleted = False
         self._in_delete = False
+        self.last_table: str | None = None
 
-    def table(self, _name):
+    def table(self, name: str):
+        self.last_table = name
         return self
 
     def select(self, *_a, **_k):
@@ -1405,6 +1412,7 @@ def test_journal_delete_success(monkeypatch):
     assert resp["data"]["entry_id"] == "jrnl_1"
     assert resp["data"]["deleted"] is True
     assert fake.deleted is True
+    assert fake.last_table == "knowledge.journal_entries"
 
 
 def test_journal_delete_missing_confirm_returns_invalid_input(monkeypatch):
@@ -1471,6 +1479,7 @@ def test_investigation_delete_note_success(monkeypatch):
     assert resp["data"]["note_id"] == "note_1"
     assert resp["data"]["deleted"] is True
     assert fake.deleted is True
+    assert fake.last_table == "knowledge.research_notes"
 
 
 def test_investigation_delete_note_missing_confirm(monkeypatch):
@@ -1522,6 +1531,7 @@ def test_investigation_delete_experiment_success(monkeypatch):
     assert resp["data"]["experiment_id"] == "exp_1"
     assert resp["data"]["deleted"] is True
     assert fake.deleted is True
+    assert fake.last_table == "knowledge.research_experiments"
 
 
 def test_investigation_delete_experiment_missing_confirm(monkeypatch):
