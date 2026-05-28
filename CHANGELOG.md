@@ -4,14 +4,7 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-### Fixed
-- **multi_search KB results path** (#20): pin down the contract that
-  `multi_search` surfaces the same KB entries as a direct `kb_search` call for
-  the same query. `handle_multi_search` continues to delegate to
-  `handle_kb_search` verbatim (no query rewriting, no extra filters); a new
-  regression test guards the field shape (`knowledge.kb_entries`) and result
-  parity end-to-end. Adds explanatory comments documenting the contract so
-  future refactors don't regress the path silently.
+## [0.8.6] - 2026-05-28
 
 ### Added
 - **`journal_delete`** (#21): hard-delete a journal entry by `entry_id`.
@@ -25,6 +18,13 @@ All notable changes to this project are documented here.
   experiment by `experiment_id` with the same safety contract. Tool count rises
   from 38 to 41.
 
+### Fixed
+- **multi_search contract pinned** (#20): `handle_multi_search` delegates
+  verbatim to `handle_kb_search` — no query rewriting, no extra filters, results
+  forwarded unchanged. A new regression test asserts field shape
+  (`knowledge.kb_entries`) and result parity end-to-end. Explanatory comments
+  guard the contract so future refactors don't regress the path silently.
+
 ### Changed
 - **`cluster_results` schema trimmed** (#22): the misleading
   `num_clusters` / `n_clusters` parameters have been removed from the input
@@ -32,6 +32,12 @@ All notable changes to this project are documented here.
   implementation buckets by `source_type` and the cluster count is determined
   entirely by the input. Behaviour is unchanged; the schema now reflects
   reality. Tool description updated accordingly.
+
+### Testing
+- **`_DeleteDb` fake records target table** (Code Critic HIGH): the test
+  double now captures which table name was passed so a handler accidentally
+  targeting the wrong table is caught immediately rather than silently
+  succeeding.
 
 ## [0.8.5] - 2026-05-28
 
