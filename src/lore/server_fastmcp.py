@@ -399,6 +399,47 @@ def investigation_list_experiments() -> str:
     return _json(_srv.handle_investigation_list_experiments())
 
 
+@mcp.tool(
+    description=(
+        "Hard-delete an investigation note by note_id (Issue #21). Requires "
+        "confirm=True; in LORE_ENV=production also requires confirm_production=True."
+    )
+)
+def investigation_delete_note(
+    note_id: str,
+    confirm: bool = False,
+    confirm_production: bool = False,
+) -> str:
+    return _json(
+        _srv.handle_investigation_delete_note(
+            note_id=note_id,
+            confirm=confirm,
+            confirm_production=confirm_production,
+        )
+    )
+
+
+@mcp.tool(
+    description=(
+        "Hard-delete an investigation experiment by experiment_id (Issue #21). "
+        "Requires confirm=True; in LORE_ENV=production also requires "
+        "confirm_production=True."
+    )
+)
+def investigation_delete_experiment(
+    experiment_id: str,
+    confirm: bool = False,
+    confirm_production: bool = False,
+) -> str:
+    return _json(
+        _srv.handle_investigation_delete_experiment(
+            experiment_id=experiment_id,
+            confirm=confirm,
+            confirm_production=confirm_production,
+        )
+    )
+
+
 # --- Journal (5) -----------------------------------------------------------
 
 
@@ -438,6 +479,26 @@ def journal_search(
             entry_type=entry_type,
             date_from=date_from,
             date_to=date_to,
+        )
+    )
+
+
+@mcp.tool(
+    description=(
+        "Hard-delete a journal entry by entry_id (Issue #21). Requires confirm=True; "
+        "in LORE_ENV=production also requires confirm_production=True."
+    )
+)
+def journal_delete(
+    entry_id: str,
+    confirm: bool = False,
+    confirm_production: bool = False,
+) -> str:
+    return _json(
+        _srv.handle_journal_delete(
+            entry_id=entry_id,
+            confirm=confirm,
+            confirm_production=confirm_production,
         )
     )
 
@@ -619,16 +680,17 @@ def deduplicate_results(results: list[dict], threshold: float = 0.9) -> str:
     return _json(_srv.handle_deduplicate_results(results=results, threshold=threshold))
 
 
-@mcp.tool(description="Cluster search results by topic/source type")
-def cluster_results(
-    results: list[dict], num_clusters: int = 5, n_clusters: int | None = None
-) -> str:
-    # n_clusters is accepted as an alias for num_clusters (QA compat). Clustering
-    # is automatic (by file/source key), so neither value affects the grouping —
-    # both are forwarded only for signature compatibility.
-    if n_clusters is not None:
-        num_clusters = n_clusters
-    return _json(_srv.handle_cluster_results(results=results, num_clusters=num_clusters))
+@mcp.tool(
+    description=(
+        "Groups search results by source_type (file extension, corpus, transcript). "
+        "The cluster count is determined by the data, not by a parameter — Issue #22 "
+        "removed the previously-misleading num_clusters/n_clusters knobs."
+    )
+)
+def cluster_results(results: list[dict]) -> str:
+    # Issue #22: signature trimmed to match reality. The handler buckets by
+    # source_type alone; no cluster-count parameter is honoured.
+    return _json(_srv.handle_cluster_results(results=results))
 
 
 # --- Retrieval Telemetry (3) — Issue #5 Phase 2 ----------------------------

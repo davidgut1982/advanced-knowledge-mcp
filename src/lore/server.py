@@ -516,6 +516,61 @@ _TOOL_DEFINITIONS = [
         description="List logged investigation experiments",
         inputSchema={"type": "object", "properties": {}},
     ),
+    types.Tool(
+        name="investigation_delete_note",
+        description=(
+            "Hard-delete an investigation note by note_id (Issue #21). Requires "
+            "confirm=True; in LORE_ENV=production also requires confirm_production=True."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "string",
+                    "description": "note_id of the investigation note to delete",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Confirmation flag for safety",
+                    "default": False,
+                },
+                "confirm_production": {
+                    "type": "boolean",
+                    "description": "Required in LORE_ENV=production to allow destructive write",
+                    "default": False,
+                },
+            },
+            "required": ["note_id"],
+        },
+    ),
+    types.Tool(
+        name="investigation_delete_experiment",
+        description=(
+            "Hard-delete an investigation experiment by experiment_id (Issue #21). "
+            "Requires confirm=True; in LORE_ENV=production also requires "
+            "confirm_production=True."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "experiment_id": {
+                    "type": "string",
+                    "description": "experiment_id of the experiment to delete",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Confirmation flag for safety",
+                    "default": False,
+                },
+                "confirm_production": {
+                    "type": "boolean",
+                    "description": "Required in LORE_ENV=production to allow destructive write",
+                    "default": False,
+                },
+            },
+            "required": ["experiment_id"],
+        },
+    ),
     # Journal Tools (4)
     types.Tool(
         name="journal_append",
@@ -577,6 +632,33 @@ _TOOL_DEFINITIONS = [
                 },
             },
             "required": ["query"],
+        },
+    ),
+    types.Tool(
+        name="journal_delete",
+        description=(
+            "Hard-delete a journal entry by entry_id (Issue #21). Requires "
+            "confirm=True; in LORE_ENV=production also requires confirm_production=True."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "entry_id": {
+                    "type": "string",
+                    "description": "entry_id of the journal entry to delete",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Confirmation flag for safety",
+                    "default": False,
+                },
+                "confirm_production": {
+                    "type": "boolean",
+                    "description": "Required in LORE_ENV=production to allow destructive write",
+                    "default": False,
+                },
+            },
+            "required": ["entry_id"],
         },
     ),
     types.Tool(
@@ -897,7 +979,11 @@ _TOOL_DEFINITIONS = [
     ),
     types.Tool(
         name="cluster_results",
-        description="Cluster search results by topic/source type",
+        description=(
+            "Groups search results by source_type (e.g. file extension, corpus, "
+            "transcript). The cluster count is determined by the data, not by a "
+            "parameter — see Issue #22 for why num_clusters/n_clusters were removed."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -905,10 +991,6 @@ _TOOL_DEFINITIONS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": "Array of search result objects",
-                },
-                "num_clusters": {
-                    "type": "integer",
-                    "description": "Number of clusters (default: 5)",
                 },
             },
             "required": ["results"],
@@ -1185,6 +1267,10 @@ async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
             return format_response(handle_investigation_log_experiment(**arguments))
         elif name == "investigation_list_experiments":
             return format_response(handle_investigation_list_experiments(**arguments))
+        elif name == "investigation_delete_note":
+            return format_response(handle_investigation_delete_note(**arguments))
+        elif name == "investigation_delete_experiment":
+            return format_response(handle_investigation_delete_experiment(**arguments))
 
         # Journal Tools
         elif name == "journal_append":
@@ -1195,6 +1281,8 @@ async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
             return format_response(handle_journal_get(**arguments))
         elif name == "journal_search":
             return format_response(handle_journal_search(**arguments))
+        elif name == "journal_delete":
+            return format_response(handle_journal_delete(**arguments))
         elif name == "snapshot_config":
             return format_response(handle_snapshot_config(**arguments))
 
@@ -2687,6 +2775,109 @@ def handle_investigation_list_experiments() -> dict:
         return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
 
 
+def handle_investigation_delete_note(
+    note_id: str = None,
+    confirm: bool = False,
+    confirm_production: bool = False,
+) -> dict:
+    """Hard-delete an investigation note by ID (Issue #21).
+
+    Safety contract — mirrors ``kb_delete``:
+      * ``confirm=True`` is mandatory; missing confirmation returns a clean
+        ``invalid_input`` envelope so agents can recover without a transport error.
+      * In ``LORE_ENV=production`` the production guard additionally requires
+        ``confirm_production=True``; otherwise a ``production_guard`` envelope
+        is returned. This prevents accidental destructive writes.
+      * Missing rows return a ``not_found`` envelope, never raise.
+    """
+    try:
+        if not note_id:
+            return ResponseEnvelope.error(ErrorCodes.INVALID_INPUT, "note_id is required")
+
+        if not confirm:
+            return ResponseEnvelope.error(
+                ErrorCodes.INVALID_INPUT,
+                "Deletion requires explicit confirmation. Set confirm=True to proceed.",
+            )
+
+        guard = _production_guard("investigation_delete_note", confirm_production)
+        if guard is not None:
+            return guard
+
+        existing = (
+            db.table("knowledge.research_notes")
+            .select("*")
+            .eq("note_id", note_id)
+            .maybe_single()
+            .execute()
+        )
+        if not existing or not existing.data:
+            return ResponseEnvelope.error(
+                ErrorCodes.NOT_FOUND, f"Investigation note not found: {note_id}"
+            )
+
+        db.table("knowledge.research_notes").delete().eq("note_id", note_id).execute()
+
+        return ResponseEnvelope.success(
+            f"Deleted investigation note {note_id}",
+            {"note_id": note_id, "deleted": True},
+        )
+    except Exception as e:
+        logger.error(f"Error deleting investigation note {note_id}: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+def handle_investigation_delete_experiment(
+    experiment_id: str = None,
+    confirm: bool = False,
+    confirm_production: bool = False,
+) -> dict:
+    """Hard-delete an investigation experiment by ID (Issue #21).
+
+    Same confirmation + production-guard + not-found contract as
+    ``investigation_delete_note``. See that handler's docstring for the full
+    safety semantics.
+    """
+    try:
+        if not experiment_id:
+            return ResponseEnvelope.error(ErrorCodes.INVALID_INPUT, "experiment_id is required")
+
+        if not confirm:
+            return ResponseEnvelope.error(
+                ErrorCodes.INVALID_INPUT,
+                "Deletion requires explicit confirmation. Set confirm=True to proceed.",
+            )
+
+        guard = _production_guard("investigation_delete_experiment", confirm_production)
+        if guard is not None:
+            return guard
+
+        existing = (
+            db.table("knowledge.research_experiments")
+            .select("*")
+            .eq("experiment_id", experiment_id)
+            .maybe_single()
+            .execute()
+        )
+        if not existing or not existing.data:
+            return ResponseEnvelope.error(
+                ErrorCodes.NOT_FOUND,
+                f"Investigation experiment not found: {experiment_id}",
+            )
+
+        db.table("knowledge.research_experiments").delete().eq(
+            "experiment_id", experiment_id
+        ).execute()
+
+        return ResponseEnvelope.success(
+            f"Deleted investigation experiment {experiment_id}",
+            {"experiment_id": experiment_id, "deleted": True},
+        )
+    except Exception as e:
+        logger.error(f"Error deleting investigation experiment {experiment_id}: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
 # =============================================================================
 # Journal Handlers
 # =============================================================================
@@ -2975,6 +3166,58 @@ def _journal_fts_postgres(
         row["score"] = _journal_like_score(row.get("content", ""), query)
     rows.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return rows
+
+
+def handle_journal_delete(
+    entry_id: str = None,
+    confirm: bool = False,
+    confirm_production: bool = False,
+) -> dict:
+    """Hard-delete a journal entry by ID (Issue #21).
+
+    Safety contract mirrors ``kb_delete``:
+      * ``confirm=True`` is mandatory; missing confirmation returns a clean
+        ``invalid_input`` envelope (never a transport error).
+      * In ``LORE_ENV=production`` the production guard additionally requires
+        ``confirm_production=True`` and returns a ``production_guard`` envelope
+        when the flag is missing. This prevents accidental destructive writes.
+      * Missing rows return a ``not_found`` envelope, never raise.
+    """
+    try:
+        if not entry_id:
+            return ResponseEnvelope.error(ErrorCodes.INVALID_INPUT, "entry_id is required")
+
+        if not confirm:
+            return ResponseEnvelope.error(
+                ErrorCodes.INVALID_INPUT,
+                "Deletion requires explicit confirmation. Set confirm=True to proceed.",
+            )
+
+        guard = _production_guard("journal_delete", confirm_production)
+        if guard is not None:
+            return guard
+
+        existing = (
+            db.table("knowledge.journal_entries")
+            .select("*")
+            .eq("entry_id", entry_id)
+            .maybe_single()
+            .execute()
+        )
+        if not existing or not existing.data:
+            return ResponseEnvelope.error(
+                ErrorCodes.NOT_FOUND, f"Journal entry not found: {entry_id}"
+            )
+
+        db.table("knowledge.journal_entries").delete().eq("entry_id", entry_id).execute()
+
+        return ResponseEnvelope.success(
+            f"Deleted journal entry {entry_id}",
+            {"entry_id": entry_id, "deleted": True},
+        )
+    except Exception as e:
+        logger.error(f"Error deleting journal entry {entry_id}: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
 
 
 def handle_snapshot_config(config_name: str, config_data: dict) -> dict:
@@ -4196,7 +4439,19 @@ def handle_search_transcripts(query: str, speaker: str = None) -> dict:
 
 
 def handle_multi_search(query: str) -> dict:
-    """Combined search across all sources."""
+    """Combined search across all sources.
+
+    Issue #20 — the KB-search subpath MUST return the same results that a
+    direct ``kb_search`` call would for the same query. Concretely, this means:
+      * route through ``handle_kb_search`` (not a private helper)
+      * pass the query verbatim — no extra terms, no sanitisation, no rewrite
+      * leave ``search_mode``/``semantic``/``hybrid`` at their defaults so
+        the same routing rules apply (Issue #20 regression test guards this)
+      * surface ``data.results`` under ``knowledge.kb_entries`` verbatim — no
+        post-filter, no slicing (kb_search already honours its own top_k=20)
+    The ``caller_agent="multi_search"`` tag only flows through to telemetry;
+    it has no effect on result filtering.
+    """
     try:
         results = {"local": [], "corpora": [], "transcripts": [], "knowledge": {}}
 
@@ -4207,7 +4462,9 @@ def handle_multi_search(query: str) -> dict:
         if local_result.get("ok"):
             results["local"] = local_result["data"]["results"][:10]
 
-        # Knowledge search using kb_search
+        # Knowledge search using kb_search (Issue #20).
+        # Pass the query through unchanged so multi_search and a direct
+        # kb_search call return identical KB results for the same input.
         knowledge_result = handle_kb_search(query, caller_agent="multi_search")
         if knowledge_result.get("ok"):
             results["knowledge"] = {"kb_entries": knowledge_result["data"]["results"]}
@@ -4284,14 +4541,18 @@ def handle_deduplicate_results(results: list[dict], threshold: float = 0.9) -> d
         return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
 
 
-def handle_cluster_results(
-    results: list[dict], num_clusters: int = 5, n_clusters: int | None = None
-) -> dict:
-    """Cluster search results by topic.
+def handle_cluster_results(results: list[dict]) -> dict:
+    """Group results by source_type (Issue #22).
 
-    ``n_clusters`` is accepted as an alias for ``num_clusters`` (QA compat).
-    Clustering is automatic (grouped by file/source key), so neither value
-    affects the grouping — both are accepted only for signature compatibility.
+    Bucketed by a per-result key — file extension when ``file`` is present,
+    ``corpus`` / ``transcript`` for the corresponding source types, otherwise
+    ``other``. The cluster count is determined entirely by the input data;
+    there is no parameter to override it.
+
+    Issue #22: the previously-accepted ``num_clusters`` / ``n_clusters`` knobs
+    were misleading (they were ignored by the implementation) and have been
+    removed from the schema and signature. Behaviour is unchanged — only the
+    surface API has been trimmed to match reality.
     """
     try:
         clusters = {}

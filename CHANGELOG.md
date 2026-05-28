@@ -4,6 +4,41 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-05-28
+
+### Added
+- **`journal_delete`** (#21): hard-delete a journal entry by `entry_id`.
+  Requires `confirm=True`; in `LORE_ENV=production` additionally requires
+  `confirm_production=True` (production guard). Missing rows return a clean
+  `not_found` envelope; missing confirmation returns `invalid_input`.
+- **`investigation_delete_note`** (#21): hard-delete an investigation note by
+  `note_id` with the same confirmation + production-guard contract as
+  `journal_delete`.
+- **`investigation_delete_experiment`** (#21): hard-delete an investigation
+  experiment by `experiment_id` with the same safety contract. Tool count rises
+  from 38 to 41.
+
+### Fixed
+- **multi_search contract pinned** (#20): `handle_multi_search` delegates
+  verbatim to `handle_kb_search` — no query rewriting, no extra filters, results
+  forwarded unchanged. A new regression test asserts field shape
+  (`knowledge.kb_entries`) and result parity end-to-end. Explanatory comments
+  guard the contract so future refactors don't regress the path silently.
+
+### Changed
+- **`cluster_results` schema trimmed** (#22): the misleading
+  `num_clusters` / `n_clusters` parameters have been removed from the input
+  schema and handler signature. They were always silently ignored — the
+  implementation buckets by `source_type` and the cluster count is determined
+  entirely by the input. Behaviour is unchanged; the schema now reflects
+  reality. Tool description updated accordingly.
+
+### Testing
+- **`_DeleteDb` fake records target table** (Code Critic HIGH): the test
+  double now captures which table name was passed so a handler accidentally
+  targeting the wrong table is caught immediately rather than silently
+  succeeding.
+
 ## [0.8.5] - 2026-05-28
 
 ### Changed
