@@ -144,7 +144,7 @@ async def extract_and_store(
 
         try:
             merge, existing_id = await should_merge(
-                candidate, db_client, similarity_threshold=dedup_threshold
+                candidate, db_client, rrf_threshold=dedup_threshold
             )
         except Exception as exc:  # noqa: BLE001 - dedup must not break the pipeline
             logger.debug("dedup raised, treating as new entry: %s", exc)
@@ -152,9 +152,11 @@ async def extract_and_store(
 
         try:
             if merge and existing_id:
-                # Refresh content AND tags so confidence/type don't go stale.
+                # Refresh title, content AND tags so the merged entry doesn't
+                # keep a stale title/confidence/type from the original write.
                 db_client.kb_update(
                     existing_id,
+                    title=_candidate_title(candidate),
                     content=candidate.content,
                     tags=_candidate_tags(candidate),
                 )

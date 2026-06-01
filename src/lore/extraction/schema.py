@@ -36,7 +36,7 @@ class MemoryCandidate(BaseModel):
     content: str  # normalized canonical statement
     confidence: float = Field(ge=0.0, le=1.0)
     durable: bool = True
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
 
 
 class ExtractionResult(BaseModel):

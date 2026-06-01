@@ -46,7 +46,9 @@ def filter_turns(
                     for block in content
                 )
             else:
-                content = str(content)
+                # Non-string, non-list content has no recoverable text value;
+                # str(None) -> "None" would otherwise leak into extraction.
+                content = ""
 
         cleaned = _clean_content(content, max_turn_chars)
 
@@ -94,7 +96,7 @@ def _is_json_line(line: str) -> bool:
     Triggers if >60% of non-space chars are punctuation typical of JSON/code.
     """
     stripped = line.strip()
-    if not stripped or len(stripped) < 10:
+    if not stripped or len(stripped) < 5:
         return False
     code_chars = sum(1 for c in stripped if c in "{}[](),;:\"'=><|\\")
     return (code_chars / len(stripped)) > 0.60

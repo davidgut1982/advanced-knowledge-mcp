@@ -236,12 +236,18 @@ def test_rolling_cursor_resets_on_session_switch(mock_client):
 
 def test_session_turns_bounded_over_long_session(mock_client):
     # Over a long session the buffer must NOT grow without bound: after each
-    # mid-session fire it is trimmed to roughly stride + overlap turns.
-    p = _provider(mock_client, rolling=True, stride=15, overlap=5)
-    _add_turns(p, 200)
-    # Worst case the buffer holds the overlap look-back plus up to one stride of
-    # fresh, not-yet-fired turns: stride + overlap = 20.
-    assert len(p._session_turns) <= 15 + 5
+    # mid-session fire it is trimmed to roughly stride + overlap turns. Assert
+    # the bound after EVERY turn (not just at the end) so a transient overshoot
+    # between fires can't slip through.
+    stride, overlap = 15, 5
+    p = _provider(mock_client, rolling=True, stride=stride, overlap=overlap)
+    for i in range(200):
+        # sync_turn takes (user_content, assistant_content); one call appends a
+        # single _session_turns exchange, mirroring _add_turns.
+        p.sync_turn(f"user message {i}" * 5, f"assistant reply {i}")
+        assert (
+            len(p._session_turns) <= stride + overlap
+        ), f"buffer too large after turn {i}"
     # And the cursor stays within the (now small) buffer — never an absolute
     # 200-turn offset.
     assert p._last_extracted_turn <= len(p._session_turns)
@@ -287,18 +293,37 @@ def test_cursor_rolls_back_on_sync_extraction_failure(mock_client, monkeypatch):
 def test_cursor_rolls_back_on_async_extraction_failure(mock_client, monkeypatch):
     # Async path (running loop): the failing task's done-callback rolls the
     # cursor back. Driving sync_turn from inside a running loop exercises the
-    # create_task branch.
+    # create_task branch. Rather than relying on a fixed number of
+    # ``asyncio.sleep(0)`` ticks (fragile — the callback may not have fired yet),
+    # capture the extraction task as it is created and deterministically await it.
     import asyncio
 
     _install_failing_extractor(monkeypatch)
     p = _provider(mock_client, rolling=True, stride=15, overlap=5)
     p._maybe_fire_extraction = type(p)._maybe_fire_extraction.__get__(p)
 
+    done = asyncio.Event()
+    created: list[asyncio.Task] = []
+
     async def _drive():
+        loop = asyncio.get_running_loop()
+        orig_create_task = loop.create_task
+
+        def _capturing_create_task(coro, **kwargs):  # type: ignore[no-untyped-def]
+            task = orig_create_task(coro, **kwargs)
+            created.append(task)
+            # Fire AFTER the provider's own done-callback so the rollback has
+            # already run by the time we stop waiting.
+            task.add_done_callback(lambda _t: done.set())
+            return task
+
+        monkeypatch.setattr(loop, "create_task", _capturing_create_task)
+
         _add_turns(p, 15)
-        # Let the just-created extraction task run and its done-callback fire.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # The extraction task must have been created on the running loop.
+        assert created, "expected an async extraction task to be created"
+        # Block until the task (and thus the rollback done-callback) has fired.
+        await done.wait()
 
     asyncio.run(_drive())
     # Rolled back to the (trimmed) pre-advance value.

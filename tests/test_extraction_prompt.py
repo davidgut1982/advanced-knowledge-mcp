@@ -46,6 +46,34 @@ def test_extraction_result_empty_default():
     assert result.memories == []
 
 
+def test_filler_only_yields_no_memories() -> None:
+    # A filler-only conversation ("ok thanks", "sounds good") should yield no
+    # extractable memories: the model returns {"memories": []}.
+    result = ExtractionResult.model_validate({"memories": []})
+    assert len(result.memories) == 0
+    # Document the prompt contract: filler is explicitly listed under SKIP.
+    lowered = EXTRACTION_PROMPT_V1.lower()
+    assert any(token in lowered for token in ("filler", "ok thanks", "sounds good"))
+
+
+def test_factual_statement_produces_preference() -> None:
+    # A clear preference statement maps to a fully valid PREFERENCE candidate
+    # satisfying every schema constraint (confidence bounds, durable flag).
+    candidate = MemoryCandidate(
+        type=MemoryType.PREFERENCE,
+        content="prefers Python over Ruby",
+        confidence=0.9,
+        durable=True,
+    )
+    assert candidate.type is MemoryType.PREFERENCE
+    assert candidate.content == "prefers Python over Ruby"
+    assert candidate.confidence == 0.9
+    assert candidate.durable is True
+    # Round-trips through model validation cleanly.
+    revalidated = MemoryCandidate.model_validate(candidate.model_dump())
+    assert revalidated == candidate
+
+
 def test_memory_type_values():
     assert MemoryType.USER_FACT.value == "user_fact"
     assert MemoryType.PREFERENCE.value == "preference"

@@ -108,6 +108,23 @@ def test_filter_empty_after_cleaning_returns_empty_list():
     assert out == []
 
 
+def test_filter_drops_none_content() -> None:
+    # content=None is non-string, non-list -> coerced to "" (not "None"), so the
+    # turn cleans to empty and is dropped as noise.
+    turns = [{"role": "user", "content": None}]
+    out = filter_turns(turns)
+    assert out == []
+
+
+def test_filter_short_json_blob_is_stripped() -> None:
+    # '{"a":1}' is a short, high-punctuation-density JSON blob. With the lowered
+    # length guard (>=5 chars) it is evaluated by _is_json_line, classified as
+    # code, stripped to empty, then dropped by min_turn_chars.
+    turns = [_turn('{"a":1}')]
+    out = filter_turns(turns)
+    assert out == []
+
+
 def test_filter_takes_last_n_not_first_n():
     turns = [_turn(f"This is meaningful message number {i}.") for i in range(1, 26)]
     out = filter_turns(turns, max_turns=5)

@@ -474,10 +474,6 @@ class LoreMemoryProvider(MemoryProvider):
         # extraction draws from, so guard on both.
         if not self._captured_turns and not self._session_turns:
             return
-        # Snapshot the persistence buffer before the finally-block clears it so
-        # the non-rolling extraction pass below sees the same turns that were
-        # flushed (existing behavior, unchanged).
-        turns_snapshot = list(self._captured_turns)
         if self._captured_turns:
             try:
                 self._persist_turns()
@@ -507,7 +503,11 @@ class LoreMemoryProvider(MemoryProvider):
                 return
             turns_to_extract = remaining
         else:
-            turns_to_extract = turns_snapshot
+            # Non-rolling: use _session_turns (persists full session history
+            # regardless of write_frequency), not _captured_turns — under
+            # write_frequency="turn" the latter is cleared after every turn and
+            # would be empty here, silently extracting zero memories.
+            turns_to_extract = list(self._session_turns)  # full session history
         self._maybe_fire_extraction(turns_to_extract)
         # Reset rolling-window state so the next session starts clean.
         self._session_turns = []
@@ -627,16 +627,19 @@ class LoreMemoryProvider(MemoryProvider):
         task = loop.create_task(coro)
 
         if pre_advance is not None:
+            # Bind the narrowed (non-None) value to a local so the default
+            # argument below is typed ``int`` rather than ``int | None``.
+            rollback_to: int = pre_advance
 
-            def _on_done(t: asyncio.Task) -> None:
+            def _on_done(t: asyncio.Task, _pa: int = rollback_to) -> None:
                 if t.exception() is not None:
                     logger.warning(
                         "Rolling extraction task failed; rolling back cursor "
                         "from %d to %d",
                         self._last_extracted_turn,
-                        pre_advance,
+                        _pa,
                     )
-                    self._last_extracted_turn = pre_advance
+                    self._last_extracted_turn = _pa
 
             task.add_done_callback(_on_done)
 

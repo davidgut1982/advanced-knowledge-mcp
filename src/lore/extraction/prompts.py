@@ -21,11 +21,14 @@ EXTRACT these types:
 - event        — significant things that happened (incident, decision, launch)
 - system_fact  — tech stack, infra, versions, constraints
 
+subject: use "user" for personal facts; "project:<name>" or "system:<name>" for infrastructure/project facts
+
 SKIP (return nothing for these):
 - Questions without a clear answer in the conversation
 - "maybe", "I think", "not sure if"
 - Filler ("sounds good", "ok thanks", "got it")
 - Transient context that won't matter next week
+- Statements with unresolvable references ("I prefer that", "he'll handle it") where the referent is absent from this excerpt
 
 Return ONLY valid JSON matching this schema:
 {"memories": [{"type": "...", "subject": "...", "content": "...", "confidence": 0.0, "durable": true, "tags": []}]}
