@@ -358,7 +358,7 @@ def add_or_update(
     top = hits[0] if hits else None
     rrf = top.get("rrf_score") if isinstance(top, dict) else None
 
-    if top is not None and isinstance(rrf, (int | float)) and rrf >= threshold:
+    if top is not None and isinstance(rrf, (int, float)) and rrf >= threshold:
         kb_id = top.get("kb_id")
         client.kb_update(kb_id, content=content, title=title, tags=tags)
         return {"action": "updated", "kb_id": kb_id}
