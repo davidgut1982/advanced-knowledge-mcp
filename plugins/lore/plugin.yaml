@@ -17,5 +17,19 @@ config:
   prefs_enabled: false        # surface cached user prefs in the recall block
   prefs_topic: hermes-user-prefs
   prefs_cache_ttl: 300        # seconds; invalidated on writes to prefs_topic
+  auto_extract:
+    enabled: false              # set true + OPENROUTER_API_KEY to activate
+    provider: openrouter          # options: openrouter, cerebras
+    model: meta-llama/llama-3.1-8b-instruct
+    provider_order:               # openrouter only: backend preference
+      - Groq
+      - Together
+      - Fireworks
+    # --- Cerebras alternative (comment out openrouter block above) ---
+    # provider: cerebras
+    # model: gpt-oss-120b         # 300+ TPS, 91-99% cache hit
+    confidence_threshold: 0.75
+    dedup_similarity_threshold: 0.12   # hybrid kb_search rrf_score (~0.0-0.3, higher = more similar), NOT cosine
+    min_turns: 3
 requires:
   - httpx

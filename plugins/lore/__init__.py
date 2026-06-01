@@ -451,12 +451,56 @@ class LoreMemoryProvider(MemoryProvider):
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self._captured_turns:
             return
+        # Snapshot turns before the finally-block clears them so the optional
+        # extraction pass below sees the full session.
+        turns_snapshot = list(self._captured_turns)
         try:
             self._persist_turns()
         except Exception as exc:  # noqa: BLE001 - never raise into the agent
             logger.debug("Lore on_session_end flush failed: %s", exc)
         finally:
             self._captured_turns = []
+        # Optional automatic memory extraction (off by default). Fire-and-forget
+        # so it never delays session teardown; fully best-effort.
+        self._maybe_fire_extraction(turns_snapshot)
+
+    def _maybe_fire_extraction(self, captured_turns: list[dict[str, str]]) -> None:
+        """Kick off background memory extraction if enabled in config.
+
+        No-op unless ``auto_extract.enabled`` is set. Imports the extraction
+        pipeline lazily and degrades silently if the lore-mcp package providing
+        it is not importable, so the plugin keeps working without it.
+        """
+        if not self._config.get("auto_extract", {}).get("enabled", False):
+            return
+        if self._client is None or not captured_turns:
+            return
+        try:
+            from lore.extraction import extract_and_store
+        except Exception as exc:  # noqa: BLE001 - extraction package optional
+            logger.debug("Auto-extraction unavailable (import failed): %s", exc)
+            return
+        # Flatten captured user/assistant turns into role/content turns.
+        turns: list[dict[str, str]] = []
+        for turn in captured_turns:
+            if turn.get("user"):
+                turns.append({"role": "user", "content": turn["user"]})
+            if turn.get("assistant"):
+                turns.append({"role": "assistant", "content": turn["assistant"]})
+        coro = extract_and_store(
+            turns=turns,
+            db_client=self._client,
+            config=self._config,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except RuntimeError:
+            # No running loop (synchronous teardown) — run to completion now.
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # noqa: BLE001 - never raise into the agent
+                logger.debug("Auto-extraction run failed: %s", exc)
 
     def _persist_turns(self) -> None:
         """Store captured turns to Lore as one structured conversation entry."""
