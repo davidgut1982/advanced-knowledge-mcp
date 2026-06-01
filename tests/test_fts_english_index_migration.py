@@ -106,8 +106,15 @@ def test_migration_and_constant_share_index_name() -> None:
     assert INDEX_NAME in db_client.KB_FTS_ENGLISH_COMBINED_INDEX_DDL
 
 
-def test_bootstrap_executes_both_fts_statements() -> None:
-    """PostgreSQL _init_schema must wire in both constants so fresh DBs get the index."""
+def test_bootstrap_executes_fts_index_statement() -> None:
+    """PostgreSQL _init_schema must wire in the index constant so fresh DBs get the index."""
     source = inspect.getsource(db_client.LocalPostgresClient._init_schema)
-    assert "KB_FTS_ENGLISH_COMBINED_EXTENSION_DDL" in source
     assert "KB_FTS_ENGLISH_COMBINED_INDEX_DDL" in source
+
+
+def test_migration_index_statement_uses_combined_expression() -> None:
+    """The migration SQL itself must use the same combined expression as the constant."""
+    statements = _migration_statements()
+    index_stmts = [s for s in statements if INDEX_NAME in s]
+    assert len(index_stmts) == 1, f"expected one index statement, got {index_stmts}"
+    assert COMBINED_EXPRESSION in index_stmts[0]

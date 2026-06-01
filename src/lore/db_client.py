@@ -66,9 +66,7 @@ class QueryResult:
 # migrations/009_trust_score.sql byte-for-byte (a unit test enforces parity).
 # Applied in LocalPostgresClient._init_schema for PostgreSQL; SQLite gets the
 # equivalent column from _SQLITE_SCHEMA + an idempotent PRAGMA-guarded ALTER.
-KB_ENTRIES_TRUST_SCORE_DDL = (
-    "ALTER TABLE knowledge.kb_entries ADD COLUMN IF NOT EXISTS trust_score REAL DEFAULT 1.0;"
-)
+KB_ENTRIES_TRUST_SCORE_DDL = "ALTER TABLE knowledge.kb_entries ADD COLUMN IF NOT EXISTS trust_score REAL DEFAULT 1.0;"
 
 
 # Issue #26: pg_trgm GIN index on knowledge.kb_entries.content. The lexical /
@@ -89,8 +87,6 @@ KB_CONTENT_TRGM_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_kb_entries_content_trgm "
     "ON knowledge.kb_entries USING gin (content gin_trgm_ops);"
 )
-
-KB_FTS_ENGLISH_COMBINED_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS btree_gin;"
 
 KB_FTS_ENGLISH_COMBINED_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_kb_entries_fts_english_combined"
@@ -138,7 +134,9 @@ class LocalPostgresClient:
         # Mirrors the SqliteClient interface so lore.search can stay backend-agnostic.
         self.vec_extension_loaded: bool = False
         self.pgvector_version: str | None = None
-        self.vector_type: str = "vector"  # "halfvec" when pgvector >= 0.7, else "vector"
+        self.vector_type: str = (
+            "vector"  # "halfvec" when pgvector >= 0.7, else "vector"
+        )
         self._schema_initialized: bool = False
 
         logger.info(f"LocalPostgresClient initialized for {database}@{host}:{port}")
@@ -175,7 +173,9 @@ class LocalPostgresClient:
         Sets self.vec_extension_loaded, self.pgvector_version, and
         self.vector_type so callers can introspect the live capabilities.
         """
-        semantic_enabled = os.getenv("LORE_SEMANTIC_SEARCH", "false").strip().lower() == "true"
+        semantic_enabled = (
+            os.getenv("LORE_SEMANTIC_SEARCH", "false").strip().lower() == "true"
+        )
         conn = self._conn
         cursor = conn.cursor()
         # Safe default: if anything fails before the pgvector probe below
@@ -224,7 +224,6 @@ class LocalPostgresClient:
             # production DB uses the CONCURRENTLY variant in
             # migrations/011_kb_fts_english_combined_index.sql. Mirrors the
             # KB_FTS_ENGLISH_COMBINED_* constants (a unit test enforces it).
-            cursor.execute(KB_FTS_ENGLISH_COMBINED_EXTENSION_DDL.rstrip(";"))
             cursor.execute(KB_FTS_ENGLISH_COMBINED_INDEX_DDL.rstrip(";"))
             logger.debug("idx_kb_entries_fts_english_combined ensured")
 
@@ -259,7 +258,11 @@ class LocalPostgresClient:
                     return tuple(parts)
 
                 try:
-                    supports_halfvec = _version_tuple(self.pgvector_version) >= (0, 7, 0)
+                    supports_halfvec = _version_tuple(self.pgvector_version) >= (
+                        0,
+                        7,
+                        0,
+                    )
                 except Exception:  # noqa: BLE001
                     supports_halfvec = False
 
@@ -352,7 +355,9 @@ class LocalPostgresClient:
                 telemetry_module.ensure_telemetry_schema(self._conn)
                 logger.info("Retrieval telemetry schema ready")
             except Exception as e:  # noqa: BLE001
-                logger.warning("Failed to initialize telemetry schema (non-fatal): %s", e)
+                logger.warning(
+                    "Failed to initialize telemetry schema (non-fatal): %s", e
+                )
 
             # Hard negative pairs schema (Phase 3) — requires mining enabled +
             # PostgreSQL. ensure_hard_negative_schema already swallows + logs any
@@ -424,13 +429,17 @@ class TableQuery:
         self._count_mode = count  # "exact", "planned", or "estimated"
         return self
 
-    def insert(self, data: Union[dict, list[dict]], upsert: bool = False) -> "TableQuery":
+    def insert(
+        self, data: Union[dict, list[dict]], upsert: bool = False
+    ) -> "TableQuery":
         """Insert data into table."""
         self._operation = "upsert" if upsert else "insert"
         self._data = data if isinstance(data, list) else [data]
         return self
 
-    def upsert(self, data: Union[dict, list[dict]], on_conflict: str = None) -> "TableQuery":
+    def upsert(
+        self, data: Union[dict, list[dict]], on_conflict: str = None
+    ) -> "TableQuery":
         """Upsert (insert or update on conflict)."""
         self._operation = "upsert"
         self._data = data if isinstance(data, list) else [data]
@@ -727,7 +736,9 @@ class TableQuery:
 
         where_clause, where_values = self._build_where_clause()
 
-        sql = f"UPDATE {self.table} SET {', '.join(set_parts)}{where_clause} RETURNING *"
+        sql = (
+            f"UPDATE {self.table} SET {', '.join(set_parts)}{where_clause} RETURNING *"
+        )
 
         cursor.execute(sql, set_values + where_values)
         data = [dict(row) for row in cursor.fetchall()]
@@ -803,7 +814,8 @@ class SupabaseTableWrapper:
         """Execute and return QueryResult."""
         response = self._query.execute()
         return QueryResult(
-            data=response.data if response.data else [], count=getattr(response, "count", None)
+            data=response.data if response.data else [],
+            count=getattr(response, "count", None),
         )
 
 
@@ -1126,13 +1138,17 @@ class SqliteTableQuery:
         self._count_mode = count
         return self
 
-    def insert(self, data: Union[dict, list[dict]], upsert: bool = False) -> "SqliteTableQuery":
+    def insert(
+        self, data: Union[dict, list[dict]], upsert: bool = False
+    ) -> "SqliteTableQuery":
         """Insert data into table."""
         self._operation = "upsert" if upsert else "insert"
         self._data = data if isinstance(data, list) else [data]
         return self
 
-    def upsert(self, data: Union[dict, list[dict]], on_conflict: str = None) -> "SqliteTableQuery":
+    def upsert(
+        self, data: Union[dict, list[dict]], on_conflict: str = None
+    ) -> "SqliteTableQuery":
         """Upsert (INSERT OR REPLACE) data into table."""
         self._operation = "upsert"
         self._data = data if isinstance(data, list) else [data]
@@ -1428,7 +1444,9 @@ class SqliteTableQuery:
         rowids = [r["rowid"] for r in pre_rows]
 
         if rowids:
-            update_sql = f"UPDATE {self._table} SET {', '.join(set_parts)}{where_clause}"
+            update_sql = (
+                f"UPDATE {self._table} SET {', '.join(set_parts)}{where_clause}"
+            )
             conn.execute(update_sql, set_values + where_values)
             conn.commit()
 
@@ -1514,7 +1532,9 @@ class SqliteClient:
 
     def _try_load_vec_extension(self) -> None:
         """Best-effort sqlite-vec load. Silent failure when semantic is off."""
-        semantic_enabled = os.getenv("LORE_SEMANTIC_SEARCH", "false").strip().lower() == "true"
+        semantic_enabled = (
+            os.getenv("LORE_SEMANTIC_SEARCH", "false").strip().lower() == "true"
+        )
         try:
             self._conn.enable_load_extension(True)
         except (AttributeError, self._sqlite3.OperationalError) as exc:
@@ -1529,7 +1549,9 @@ class SqliteClient:
             import sqlite_vec
         except ImportError as exc:
             if semantic_enabled:
-                logger.error("sqlite-vec not installed; install '.[semantic]' extra: %s", exc)
+                logger.error(
+                    "sqlite-vec not installed; install '.[semantic]' extra: %s", exc
+                )
             else:
                 logger.debug("sqlite-vec not installed (semantic disabled): %s", exc)
             # Re-disable load extension to keep the surface small.
@@ -1567,7 +1589,9 @@ class SqliteClient:
         gracefully — see lore.search.
         """
         conn = self._conn
-        semantic_enabled = os.getenv("LORE_SEMANTIC_SEARCH", "false").strip().lower() == "true"
+        semantic_enabled = (
+            os.getenv("LORE_SEMANTIC_SEARCH", "false").strip().lower() == "true"
+        )
 
         try:
             conn.executescript(_SQLITE_SCHEMA)
@@ -1619,7 +1643,10 @@ class SqliteClient:
         PostgreSQL ``ADD COLUMN IF NOT EXISTS trust_score REAL DEFAULT 1.0``.
         """
         try:
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge_kb_entries)")}
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(knowledge_kb_entries)")
+            }
             if "trust_score" not in cols:
                 conn.execute(
                     "ALTER TABLE knowledge_kb_entries ADD COLUMN trust_score REAL DEFAULT 1.0"
@@ -1671,7 +1698,9 @@ class SqliteClient:
 
         Returns an empty QueryResult to keep callers happy.
         """
-        logger.debug("SqliteClient.rpc called for '%s' — returning empty result", function_name)
+        logger.debug(
+            "SqliteClient.rpc called for '%s' — returning empty result", function_name
+        )
         return QueryResult(data=[])
 
     def close(self):
@@ -1716,7 +1745,9 @@ def get_db_client(
         try:
             backend = DatabaseBackend(backend_str)
         except ValueError:
-            logger.warning(f"Unknown DB_BACKEND '{backend_str}', falling back to supabase")
+            logger.warning(
+                f"Unknown DB_BACKEND '{backend_str}', falling back to supabase"
+            )
             backend = DatabaseBackend.SUPABASE
 
     # LOCAL / POSTGRES / POSTGRESQL all map to the same local PostgreSQL client.
@@ -1724,7 +1755,11 @@ def get_db_client(
     # check here that value used to fall through to the Supabase branch and
     # crash demanding SUPABASE_URL. _backend_kind() already treats these three
     # spellings as the PostgreSQL path — this keeps get_db_client() consistent.
-    if backend in (DatabaseBackend.LOCAL, DatabaseBackend.POSTGRES, DatabaseBackend.POSTGRESQL):
+    if backend in (
+        DatabaseBackend.LOCAL,
+        DatabaseBackend.POSTGRES,
+        DatabaseBackend.POSTGRESQL,
+    ):
         return LocalPostgresClient(
             host=kwargs.get("host", os.getenv("DB_HOST", "localhost")),
             port=int(kwargs.get("port", os.getenv("DB_PORT", "5433"))),
@@ -1739,13 +1774,18 @@ def get_db_client(
             "db_path",
             os.getenv(
                 "SQLITE_DB_PATH",
-                str(Path(os.getenv("KNOWLEDGE_DATA_DIR", "./knowledge-data")) / "knowledge.db"),
+                str(
+                    Path(os.getenv("KNOWLEDGE_DATA_DIR", "./knowledge-data"))
+                    / "knowledge.db"
+                ),
             ),
         )
         return SqliteClient(db_path=db_path)
     else:
         url = kwargs.get("url", os.getenv("SUPABASE_URL"))
-        key = kwargs.get("key", os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY"))
+        key = kwargs.get(
+            "key", os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+        )
 
         if not url or not key:
             raise ValueError(
