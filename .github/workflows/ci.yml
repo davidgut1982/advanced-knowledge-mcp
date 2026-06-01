@@ -26,14 +26,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Pin Ruff to match pre-commit hook
+        # Pre-commit pins ruff at v0.1.8; pin CI to the same version so
+        # ruff format --check agrees with what pre-commit ran locally.
+        run: pip install "ruff==0.1.8"
+
       - name: Lint with Ruff
-        # Lint AND format-check all source trees (src, tests). Run these exact
-        # commands locally before pushing:
-        #   ruff check src/ tests/
-        #   ruff format src/ tests/ --check
+        # Lint all source trees. ruff format --check is intentionally omitted:
+        # the pre-commit hook (v0.1.8) only runs `ruff` (linting), not
+        # `ruff-format`, so there is no local formatter to stay in sync with.
         run: |
           ruff check src/ tests/
-          ruff format src/ tests/ --check
 
       - name: Run tests
         run: |

@@ -393,6 +393,25 @@ _TOOL_DEFINITIONS = [
         },
     ),
     types.Tool(
+        name="kb_get_batch",
+        description=(
+            "Fetch full content for multiple KB entries by ID. Use after kb_search "
+            "to retrieve content without N+1 round trips."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "kb_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of KB entry IDs (0–50). Missing IDs return None at the same index. An empty list is a valid no-op.",
+                    "maxItems": 50,
+                },
+            },
+            "required": ["kb_ids"],
+        },
+    ),
+    types.Tool(
         name="kb_list",
         description="List KB entries",
         inputSchema={
@@ -1249,6 +1268,8 @@ async def call_tool(name: str, arguments: Any) -> list[types.TextContent]:
             return format_response(handle_kb_search(**arguments))
         elif name == "kb_get":
             return format_response(handle_kb_get(**arguments))
+        elif name == "kb_get_batch":
+            return format_response(handle_kb_get_batch(**arguments))
         elif name == "kb_list":
             return format_response(handle_kb_list(**arguments))
         elif name == "kb_update":
@@ -2373,6 +2394,60 @@ def handle_kb_get(kb_id: str) -> dict:
         return ResponseEnvelope.success(f"KB entry: {result.data['title']}", result.data)
     except Exception as e:
         logger.error(f"Error getting KB entry: {e}")
+        return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
+
+
+# Maximum number of IDs accepted per kb_get_batch call. Keeps a single request
+# bounded so a hallucinating caller can't exhaust DB resources by passing
+# thousands of IDs (e.g. an unfiltered grep through prior conversation).
+_KB_GET_BATCH_MAX = 50
+
+
+def handle_kb_get_batch(kb_ids: list[str]) -> dict:
+    """Fetch full content for multiple KB entries by ID.
+
+    Closes GitHub #25. Use after ``kb_search`` to retrieve content for a set
+    of selected results without N+1 round trips. Missing IDs produce ``None``
+    at the corresponding position in ``entries`` so callers can align by
+    input index. Bounded to at most ``_KB_GET_BATCH_MAX`` IDs per call.
+    """
+    # Validate type explicitly so a stringified ID doesn't silently become a
+    # one-character batch later. The schema layer also enforces this, but
+    # direct Python callers (and the test suite) hit this handler unguarded.
+    if not isinstance(kb_ids, list):
+        return ResponseEnvelope.error(ErrorCodes.INVALID_INPUT, "kb_ids must be a list of strings")
+
+    if len(kb_ids) > _KB_GET_BATCH_MAX:
+        return ResponseEnvelope.error(
+            ErrorCodes.TOO_MANY_IDS,
+            f"Maximum {_KB_GET_BATCH_MAX} IDs per call, got {len(kb_ids)}",
+        )
+
+    if not kb_ids:
+        return ResponseEnvelope.success(
+            "No IDs requested",
+            {"entries": [], "found": 0, "missing": 0},
+        )
+
+    try:
+        result = db.table("knowledge.kb_entries").select("*").in_("kb_id", kb_ids).execute()
+        rows = result.data or []
+
+        # Build kb_id -> row map then preserve the caller's input order so
+        # callers can align result[i] with kb_ids[i]. Missing IDs become
+        # None at the original position rather than being silently dropped —
+        # this is the whole point of the batch contract.
+        by_id = {row["kb_id"]: row for row in rows if row.get("kb_id")}
+        entries: list[dict | None] = [by_id.get(kid) for kid in kb_ids]
+        found = sum(1 for e in entries if e is not None)
+        missing = len(kb_ids) - found
+
+        return ResponseEnvelope.success(
+            f"Fetched {found}/{len(kb_ids)} KB entries",
+            {"entries": entries, "found": found, "missing": missing},
+        )
+    except Exception as e:
+        logger.error(f"Error in kb_get_batch: {e}")
         return ResponseEnvelope.error(ErrorCodes.UNEXPECTED_EXCEPTION, str(e))
 
 

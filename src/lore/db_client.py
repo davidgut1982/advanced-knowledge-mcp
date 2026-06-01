@@ -71,6 +71,26 @@ KB_ENTRIES_TRUST_SCORE_DDL = (
 )
 
 
+# Issue #26: pg_trgm GIN index on knowledge.kb_entries.content. The lexical /
+# substring search paths (journal ILIKE fallback and any TableQuery.ilike()
+# filter that compiles to ``content ILIKE '%term%'``) cannot use the existing
+# to_tsvector FTS indexes, so they sequentially scan a table bloated by long
+# hermes-conversations transcripts. A trigram GIN index makes those
+# ``ILIKE '%...%'`` substring queries index-accelerated without rewriting them.
+#
+# These two statements mirror migrations/010_kb_content_trgm_index.sql (a unit
+# test enforces parity). They use the NON-CONCURRENT ``CREATE INDEX IF NOT
+# EXISTS`` form because bootstrap runs in autocommit and a fresh DB has an empty
+# table — the build is instant. The standalone migration ships a CONCURRENTLY
+# variant for the EXISTING populated production DB so the build never holds a
+# write lock on the live table. Both are idempotent.
+KB_CONTENT_TRGM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+KB_CONTENT_TRGM_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_kb_entries_content_trgm "
+    "ON knowledge.kb_entries USING gin (content gin_trgm_ops);"
+)
+
+
 class LocalPostgresClient:
     """
     PostgreSQL client that mimics Supabase's query interface.
@@ -170,6 +190,18 @@ class LocalPostgresClient:
                 "        '[.,/\\\\:_-]', ' ', 'g')))"
             )
             logger.debug("idx_kb_search_simple ensured")
+
+            # Issue #26: pg_trgm extension + GIN trigram index on content so the
+            # lexical ILIKE '%...%' substring paths stop sequentially scanning a
+            # transcript-bloated table. NON-CONCURRENT form is safe here: fresh
+            # DBs have an empty/small table so the build is instant, and a
+            # pre-existing index short-circuits via IF NOT EXISTS. The live
+            # production DB uses the CONCURRENTLY variant in
+            # migrations/010_kb_content_trgm_index.sql (run via psql). Mirrors the
+            # KB_CONTENT_TRGM_* constants byte-for-byte (a unit test enforces it).
+            cursor.execute(KB_CONTENT_TRGM_EXTENSION_DDL.rstrip(";"))
+            cursor.execute(KB_CONTENT_TRGM_INDEX_DDL.rstrip(";"))
+            logger.debug("idx_kb_entries_content_trgm ensured")
 
             # Detect pgvector extension and version.
             cursor.execute(
