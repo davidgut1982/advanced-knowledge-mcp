@@ -32,6 +32,8 @@ requires-python = ">=3.11"
 dependencies = [
     "mcp>=0.4.0",
     "fastmcp>=3.3.1",
+    "pydantic>=2.0",
+    "httpx>=0.24.0",
     "aiofiles>=23.2.1",
     "jsonschema>=4.17.0",
     "python-dotenv>=1.0.0",
@@ -143,6 +145,7 @@ ignore = [
     "E501",   # line too long — handler code has long strings
     "UP007",  # X | Y union syntax — keep Optional[] for clarity
     "UP038",  # isinstance(x, (A, B)) — ruff 0.1.8 does not flag this; suppress to match pre-commit
+    "UP042",  # StrEnum requires Python 3.11+; project supports 3.9+
     "F401",   # unused imports — some are re-exported
 ]
 
