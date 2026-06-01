@@ -34,7 +34,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIDENCE_THRESHOLD = 0.75
-DEFAULT_DEDUP_THRESHOLD = 0.85
+DEFAULT_DEDUP_THRESHOLD = 0.12  # rrf_score range ~0–0.3; 0.85 was cosine-scale (wrong)
 DEFAULT_MIN_TURNS = 3
 _AUTO_TAG = "source:auto-extracted"
 _PENDING_TAG = "status:pending"
