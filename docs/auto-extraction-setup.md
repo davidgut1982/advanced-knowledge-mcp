@@ -97,6 +97,24 @@ kb_search(query="...", topic="auto-memory")
 | `dedup_similarity_threshold: 0.7` | Aggressive dedup, fewer entries |
 | `min_turns: 1` | Extract from every session |
 
+## Review mode (pending queue)
+
+When `review_mode: true`, new auto-extracted entries land in `topic="auto-memory-pending"`
+instead of being written directly to `auto-memory`. Merged entries (updates to existing KB
+facts) bypass the queue and are applied directly.
+
+To review pending entries:
+  kb_list(topic="auto-memory-pending")
+
+To approve an entry (promote to main KB):
+  kb_update(kb_id="kb_xxx", topic="auto-memory", tags=["source:auto-extracted", "type:preference"])
+
+To reject an entry:
+  kb_delete(kb_id="kb_xxx")
+
+Recall and search do not include `auto-memory-pending` entries by default — they are invisible
+to the agent until approved.
+
 ## Disabling
 
 Set `enabled: false` or remove `OPENROUTER_API_KEY`. The plugin degrades gracefully —

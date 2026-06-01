@@ -30,6 +30,15 @@ config:
     # model: gpt-oss-120b         # 300+ TPS, 91-99% cache hit
     confidence_threshold: 0.75
     dedup_similarity_threshold: 0.12   # hybrid kb_search rrf_score (~0.0-0.3, higher = more similar), NOT cosine
+    dry_run: false              # log candidates without writing to KB (for tuning)
+    review_mode: false          # new extractions go to auto-memory-pending topic for approval
+    type_thresholds:            # per-type confidence overrides (optional)
+      user_fact: 0.85
+      system_fact: 0.85
+      preference: 0.80
+      relationship: 0.80
+      goal: 0.75
+      event: 0.70
     rolling_window: false       # enable mid-session extraction for long sessions
     rolling_stride: 15          # fire extraction every N new turns
     rolling_overlap: 5          # look back N turns into prev window for context
