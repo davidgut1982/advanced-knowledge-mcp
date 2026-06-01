@@ -52,7 +52,13 @@ def _config(enabled=True, **overrides):
 
 
 def _turns(n=3):
-    return [{"role": "user", "content": f"message {i}"} for i in range(n)]
+    # Content must clear the filter_turns min_turn_chars noise floor (20 chars
+    # by default) so these orchestrator tests exercise the full pipeline rather
+    # than being short-circuited as noise.
+    return [
+        {"role": "user", "content": f"This is conversation message number {i}."}
+        for i in range(n)
+    ]
 
 
 def _patch_extract(result: ExtractionResult):

@@ -16,10 +16,12 @@ from typing import Any
 
 from .client import ExtractionClient
 from .dedup import AUTO_MEMORY_TOPIC, should_merge
+from .filters import DEFAULT_MAX_TURNS, filter_turns
 from .schema import ExtractionResult, MemoryCandidate, MemoryType
 
 __all__ = [
     "extract_and_store",
+    "filter_turns",
     "ExtractionClient",
     "ExtractionResult",
     "MemoryCandidate",
@@ -106,6 +108,20 @@ async def extract_and_store(
             len(turns or []),
             min_turns,
         )
+        return summary
+
+    max_turns = int(auto.get("max_turns", DEFAULT_MAX_TURNS))
+    min_turn_chars = int(auto.get("min_turn_chars", 20))
+    max_turn_chars = int(auto.get("max_turn_chars", 1200))
+
+    turns = filter_turns(
+        turns,
+        max_turns=max_turns,
+        min_turn_chars=min_turn_chars,
+        max_turn_chars=max_turn_chars,
+    )
+
+    if not turns:
         return summary
 
     confidence_threshold = float(

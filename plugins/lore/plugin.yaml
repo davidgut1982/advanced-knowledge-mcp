@@ -31,5 +31,8 @@ config:
     confidence_threshold: 0.75
     dedup_similarity_threshold: 0.12   # hybrid kb_search rrf_score (~0.0-0.3, higher = more similar), NOT cosine
     min_turns: 3
+    max_turns: 20           # cap: use last N turns; prevents huge sessions from blowing context
+    min_turn_chars: 20      # skip turns shorter than this after cleaning (noise filter)
+    max_turn_chars: 1200    # truncate individual turns to this length
 requires:
   - httpx
