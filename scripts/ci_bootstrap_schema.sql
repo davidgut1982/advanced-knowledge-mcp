@@ -55,10 +55,8 @@ CREATE INDEX IF NOT EXISTS idx_kb_entries_fts_english_combined
             coalesce(title, '') || ' ' || coalesce(content, ''))
     );
 
--- Postgres planner tuning: SSD-appropriate random I/O cost (default 4.0 is for HDD)
--- Without this, the planner may prefer Seq Scan over GIN indexes on fast storage.
-ALTER SYSTEM SET random_page_cost = 1.1;
-SELECT pg_reload_conf();
+-- Planner tuning: SSD-appropriate random I/O cost (default 4.0 causes GIN index avoidance)
+ALTER DATABASE lore SET random_page_cost = 1.1;
 
 CREATE TABLE IF NOT EXISTS knowledge.kb_doc_sync (
     doc_path     TEXT PRIMARY KEY,

@@ -271,3 +271,14 @@ def test_kb_get_batch_returns_batch(
         got = by_id[kb_id]
         assert got["title"] == want["title"]
         assert got["content"] == want["content"]
+
+    # Also verify positional None for an unknown ID.
+    unknown_id = str(uuid.uuid4())
+    batch_m = s.handle_kb_get_batch(kb_ids=[kb_ids[0], unknown_id, kb_ids[1]])
+    assert batch_m["ok"] is True, batch_m
+    entries_m = batch_m["data"]["entries"]
+    assert (
+        len(entries_m) == 3
+    ), "batch result must preserve positional alignment for missing IDs"
+    assert entries_m[1] is None, "unknown kb_id must produce None at its position"
+    assert entries_m[0] is not None and entries_m[2] is not None
