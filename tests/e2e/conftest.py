@@ -48,8 +48,10 @@ def pytest_collection_modifyitems(
         reason="LORE_E2E_URL not set; e2e tests require a live Lore endpoint"
     )
     for item in items:
-        # Only skip items that live inside this package
-        if "e2e" in str(item.fspath):
+        # Only skip items that live inside this package; exempt offline tests
+        # (e.g. test_extraction_e2e_offline.py) that use mocked HTTP.
+        path = str(item.fspath)
+        if "e2e" in path and "_offline" not in path:
             item.add_marker(skip_marker)
 
 
