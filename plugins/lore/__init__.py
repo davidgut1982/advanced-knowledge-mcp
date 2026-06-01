@@ -310,10 +310,14 @@ class LoreMemoryProvider(MemoryProvider):
         """
 
         async def _run() -> tuple[list[str], list[str]]:
-            return await asyncio.gather(
+            results = await asyncio.gather(
                 asyncio.to_thread(self._recall_lines, query),
                 asyncio.to_thread(self._pref_lines),
+                return_exceptions=True,
             )
+            recall = results[0] if isinstance(results[0], list) else []
+            prefs = results[1] if isinstance(results[1], list) else []
+            return (recall, prefs)
 
         try:
             return asyncio.run(_run())
@@ -384,8 +388,14 @@ class LoreMemoryProvider(MemoryProvider):
             except Exception as exc:  # noqa: BLE001 - best-effort
                 logger.warning("prefetch kb_get_batch failed: %s", exc)
                 rows = []
-            for kid, row in zip(need_ids, rows):
-                if isinstance(row, dict):
+            fetched_rows: dict[str, dict[str, Any]] = {
+                row["kb_id"]: row
+                for row in rows
+                if isinstance(row, dict) and row.get("kb_id")
+            }
+            for kid in need_ids:
+                row = fetched_rows.get(kid)
+                if row is not None:
                     fetched[kid] = (row.get("content") or "").strip()
 
         lines: list[str] = []
