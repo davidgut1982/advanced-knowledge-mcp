@@ -22,8 +22,8 @@ os.environ["SUPABASE_URL"] = os.getenv("SUPABASE_URL", "http://localhost:54321")
 os.environ["SUPABASE_KEY"] = os.getenv("SUPABASE_KEY", "test-key")
 os.environ["SENTRY_DSN"] = ""  # Disable Sentry
 
-from lore import server as server_module
-from lore.server import handle_mcp_index_search
+from lore import server as server_module  # noqa: E402
+from lore.server import handle_mcp_index_search  # noqa: E402
 
 
 def main():
