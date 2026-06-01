@@ -28,12 +28,8 @@ def test_prompt_contains_types():
 
 def test_memory_candidate_confidence_bounds():
     # Valid bounds accepted.
-    MemoryCandidate(
-        type=MemoryType.PREFERENCE, content="prefers Python", confidence=0.0
-    )
-    MemoryCandidate(
-        type=MemoryType.PREFERENCE, content="prefers Python", confidence=1.0
-    )
+    MemoryCandidate(type=MemoryType.PREFERENCE, content="prefers Python", confidence=0.0)
+    MemoryCandidate(type=MemoryType.PREFERENCE, content="prefers Python", confidence=1.0)
     # Out-of-range rejected.
     with pytest.raises(ValidationError):
         MemoryCandidate(type=MemoryType.PREFERENCE, content="x", confidence=1.5)

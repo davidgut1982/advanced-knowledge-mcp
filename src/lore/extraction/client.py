@@ -59,8 +59,7 @@ class ExtractionClient:
 
     def _build_messages(self, conversation_text: str) -> list[dict[str, str]]:
         user_content = (
-            f"<conversation>\n{conversation_text}\n</conversation>\n\n"
-            "Extract memories as JSON."
+            f"<conversation>\n{conversation_text}\n</conversation>\n\nExtract memories as JSON."
         )
         return [
             {"role": "system", "content": EXTRACTION_PROMPT_V1},
@@ -101,9 +100,7 @@ class ExtractionClient:
             return CEREBRAS_URL, headers, body
 
         if provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY") or config.get(
-                "openrouter_api_key"
-            )
+            api_key = os.getenv("OPENROUTER_API_KEY") or config.get("openrouter_api_key")
             if not api_key:
                 logger.warning(
                     "OPENROUTER_API_KEY not set; skipping memory extraction "
@@ -112,9 +109,7 @@ class ExtractionClient:
                 return None
             model = auto.get("model") or config.get("model") or DEFAULT_MODEL
             provider_order = (
-                auto.get("provider_order")
-                or config.get("provider_order")
-                or DEFAULT_PROVIDER_ORDER
+                auto.get("provider_order") or config.get("provider_order") or DEFAULT_PROVIDER_ORDER
             )
             headers = {
                 "Authorization": f"Bearer {api_key}",

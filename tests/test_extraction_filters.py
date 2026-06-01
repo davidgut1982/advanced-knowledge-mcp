@@ -148,12 +148,15 @@ def test_extract_and_store_respects_max_turns():
     }
     turns = [_turn(f"Meaningful conversation message {i}.") for i in range(10)]
 
-    with mock.patch(
-        "lore.extraction.filter_turns",
-        wraps=filter_turns,
-    ) as patched_filter, mock.patch(
-        "lore.extraction.ExtractionClient.extract",
-        new=mock.AsyncMock(return_value=ExtractionResult()),
+    with (
+        mock.patch(
+            "lore.extraction.filter_turns",
+            wraps=filter_turns,
+        ) as patched_filter,
+        mock.patch(
+            "lore.extraction.ExtractionClient.extract",
+            new=mock.AsyncMock(return_value=ExtractionResult()),
+        ),
     ):
         summary = asyncio.run(extract_and_store(turns, db, config))
 

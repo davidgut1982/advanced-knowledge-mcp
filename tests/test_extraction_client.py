@@ -106,9 +106,7 @@ def test_extract_returns_empty_on_http_error(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
     err_response = httpx.Response(429, request=request)
-    http_error = httpx.HTTPStatusError(
-        "rate limited", request=request, response=err_response
-    )
+    http_error = httpx.HTTPStatusError("rate limited", request=request, response=err_response)
     response = _FakeResponse(None, status_code=429, raise_exc=http_error)
     with _patch_client(response, {}):
         result = asyncio.run(ExtractionClient().extract("[user]: hi\n", {}))
@@ -187,9 +185,7 @@ def test_openrouter_still_has_provider_routing(monkeypatch):
     response = _FakeResponse(_valid_payload('{"memories": []}'))
     with _patch_client(response, recorder):
         asyncio.run(
-            ExtractionClient().extract(
-                "[user]: hi\n", {"auto_extract": {"provider": "openrouter"}}
-            )
+            ExtractionClient().extract("[user]: hi\n", {"auto_extract": {"provider": "openrouter"}})
         )
     assert recorder["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert recorder["body"]["provider"]["order"] == ["Groq", "Together", "Fireworks"]

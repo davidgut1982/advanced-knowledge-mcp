@@ -205,9 +205,7 @@ class LoreMemoryProvider(MemoryProvider):
         self._recall_mode = self._config.get("recall_mode", "hybrid")
         self._write_frequency = self._config.get("write_frequency", "turn")
         try:
-            self._dedup_threshold = float(
-                self._config.get("dedup_threshold", DEDUP_THRESHOLD)
-            )
+            self._dedup_threshold = float(self._config.get("dedup_threshold", DEDUP_THRESHOLD))
         except (TypeError, ValueError):
             self._dedup_threshold = DEDUP_THRESHOLD
         # Pref-cache knobs (config-driven; see plugin.yaml lore namespace).
@@ -386,11 +384,7 @@ class LoreMemoryProvider(MemoryProvider):
         if client is None:
             return []
         # Identify which entries still need full content fetched.
-        need_ids = [
-            e.get("kb_id", "")
-            for e in entries
-            if not e.get("content") and e.get("kb_id")
-        ]
+        need_ids = [e.get("kb_id", "") for e in entries if not e.get("content") and e.get("kb_id")]
         fetched: dict[str, str] = {}
         if need_ids:
             try:
@@ -399,9 +393,7 @@ class LoreMemoryProvider(MemoryProvider):
                 logger.warning("prefetch kb_get_batch failed: %s", exc)
                 rows = []
             fetched_rows: dict[str, dict[str, Any]] = {
-                row["kb_id"]: row
-                for row in rows
-                if isinstance(row, dict) and row.get("kb_id")
+                row["kb_id"]: row for row in rows if isinstance(row, dict) and row.get("kb_id")
             }
             for kid in need_ids:
                 row = fetched_rows.get(kid)
@@ -430,9 +422,7 @@ class LoreMemoryProvider(MemoryProvider):
 
     # -- write ---------------------------------------------------------------
 
-    def sync_turn(
-        self, user_content: str, assistant_content: str, *, session_id: str = ""
-    ) -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         # Capture raw turn for persistence. No LLM call.
         # Strip injected memory so recalled context is never re-stored.
         user_clean = strip_memory_fence(user_content or "").strip()
@@ -612,8 +602,7 @@ class LoreMemoryProvider(MemoryProvider):
             except Exception as exc:  # noqa: BLE001 - never raise into the agent
                 if pre_advance is not None:
                     logger.warning(
-                        "Auto-extraction run failed; rolling back cursor "
-                        "from %d to %d",
+                        "Auto-extraction run failed; rolling back cursor from %d to %d",
                         self._last_extracted_turn,
                         pre_advance,
                     )
@@ -634,8 +623,7 @@ class LoreMemoryProvider(MemoryProvider):
             def _on_done(t: asyncio.Task, _pa: int = rollback_to) -> None:
                 if t.exception() is not None:
                     logger.warning(
-                        "Rolling extraction task failed; rolling back cursor "
-                        "from %d to %d",
+                        "Rolling extraction task failed; rolling back cursor from %d to %d",
                         self._last_extracted_turn,
                         _pa,
                     )
@@ -664,9 +652,7 @@ class LoreMemoryProvider(MemoryProvider):
             topic=CONVERSATIONS_TOPIC,
             title=title,
             content=content,
-            tags=["hermes-session", self._session_id]
-            if self._session_id
-            else ["hermes-session"],
+            tags=["hermes-session", self._session_id] if self._session_id else ["hermes-session"],
             author="hermes",
             threshold=self._dedup_threshold,
         )

@@ -124,12 +124,8 @@ async def extract_and_store(
     if not turns:
         return summary
 
-    confidence_threshold = float(
-        auto.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
-    )
-    dedup_threshold = float(
-        auto.get("dedup_similarity_threshold", DEFAULT_DEDUP_THRESHOLD)
-    )
+    confidence_threshold = float(auto.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD))
+    dedup_threshold = float(auto.get("dedup_similarity_threshold", DEFAULT_DEDUP_THRESHOLD))
 
     conversation_text = _format_turns(turns)
     client = ExtractionClient(config)

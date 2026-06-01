@@ -56,8 +56,7 @@ def _turns(n=3):
     # by default) so these orchestrator tests exercise the full pipeline rather
     # than being short-circuited as noise.
     return [
-        {"role": "user", "content": f"This is conversation message number {i}."}
-        for i in range(n)
+        {"role": "user", "content": f"This is conversation message number {i}."} for i in range(n)
     ]
 
 
@@ -85,11 +84,7 @@ def test_returns_empty_below_min_turns():
 def test_filters_low_confidence():
     db = _FakeDB()
     result = ExtractionResult(
-        memories=[
-            MemoryCandidate(
-                type=MemoryType.PREFERENCE, content="low conf", confidence=0.5
-            )
-        ]
+        memories=[MemoryCandidate(type=MemoryType.PREFERENCE, content="low conf", confidence=0.5)]
     )
     with _patch_extract(result):
         summary = asyncio.run(extract_and_store(_turns(), db, _config()))
@@ -182,15 +177,9 @@ def test_summary_counts_correct():
 
     result = ExtractionResult(
         memories=[
-            MemoryCandidate(
-                type=MemoryType.PREFERENCE, content="brand new fact", confidence=0.9
-            ),
-            MemoryCandidate(
-                type=MemoryType.USER_FACT, content="dup existing fact", confidence=0.9
-            ),
-            MemoryCandidate(
-                type=MemoryType.GOAL, content="weak signal", confidence=0.5
-            ),
+            MemoryCandidate(type=MemoryType.PREFERENCE, content="brand new fact", confidence=0.9),
+            MemoryCandidate(type=MemoryType.USER_FACT, content="dup existing fact", confidence=0.9),
+            MemoryCandidate(type=MemoryType.GOAL, content="weak signal", confidence=0.5),
         ]
     )
     with _patch_extract(result):

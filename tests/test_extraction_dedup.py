@@ -22,9 +22,7 @@ class _FakeDB:
 
 
 def _candidate():
-    return MemoryCandidate(
-        type=MemoryType.PREFERENCE, content="prefers dark mode", confidence=0.9
-    )
+    return MemoryCandidate(type=MemoryType.PREFERENCE, content="prefers dark mode", confidence=0.9)
 
 
 # Hits carry rrf_score (the field the real Lore kb_search returns in hybrid

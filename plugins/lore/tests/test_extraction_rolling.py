@@ -245,9 +245,7 @@ def test_session_turns_bounded_over_long_session(mock_client):
         # sync_turn takes (user_content, assistant_content); one call appends a
         # single _session_turns exchange, mirroring _add_turns.
         p.sync_turn(f"user message {i}" * 5, f"assistant reply {i}")
-        assert (
-            len(p._session_turns) <= stride + overlap
-        ), f"buffer too large after turn {i}"
+        assert len(p._session_turns) <= stride + overlap, f"buffer too large after turn {i}"
     # And the cursor stays within the (now small) buffer — never an absolute
     # 200-turn offset.
     assert p._last_extracted_turn <= len(p._session_turns)
