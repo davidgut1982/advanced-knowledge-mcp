@@ -118,3 +118,12 @@ def test_migration_index_statement_uses_combined_expression() -> None:
     index_stmts = [s for s in statements if INDEX_NAME in s]
     assert len(index_stmts) == 1, f"expected one index statement, got {index_stmts}"
     assert COMBINED_EXPRESSION in index_stmts[0]
+
+
+def test_ci_bootstrap_schema_contains_combined_index() -> None:
+    """ci_bootstrap_schema.sql must include the combined FTS index so CI + fresh envs get it."""
+    bootstrap_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "ci_bootstrap_schema.sql"
+    )
+    assert bootstrap_path.is_file()
+    assert "idx_kb_entries_fts_english_combined" in bootstrap_path.read_text()
