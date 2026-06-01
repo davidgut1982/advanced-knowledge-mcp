@@ -30,6 +30,9 @@ config:
     # model: gpt-oss-120b         # 300+ TPS, 91-99% cache hit
     confidence_threshold: 0.75
     dedup_similarity_threshold: 0.12   # hybrid kb_search rrf_score (~0.0-0.3, higher = more similar), NOT cosine
+    rolling_window: false       # enable mid-session extraction for long sessions
+    rolling_stride: 15          # fire extraction every N new turns
+    rolling_overlap: 5          # look back N turns into prev window for context
     min_turns: 3
     max_turns: 20           # cap: use last N turns; prevents huge sessions from blowing context
     min_turn_chars: 20      # skip turns shorter than this after cleaning (noise filter)
