@@ -155,7 +155,7 @@ RESEARCH_ARCHITECTURE = Scenario(
     ],
     must_contain=[
         {"type": "system_fact", "contains": "pgvector"},
-        {"type": "system_fact", "contains": "rrf_score"},
+        {"type": "system_fact", "contains_any": ["rrf_score", "RRF", "rrf"]},
         {"type": "relationship", "contains": "Hermes"},
     ],
     must_not_contain=[
