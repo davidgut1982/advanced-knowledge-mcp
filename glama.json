@@ -1,0 +1,14 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "name": "lore-mcp",
+  "description": "Persistent knowledge layer for AI agents and engineering teams. Provides a hybrid-search knowledge base (KB), investigation threads, structured journal, and memory tools backed by PostgreSQL + pgvector or SQLite. Supports multi-agent attribution, semantic + full-text recall, and automatic memory extraction from conversation sessions.",
+  "license": "MIT",
+  "categories": [
+    "knowledge-management",
+    "memory",
+    "productivity",
+    "research"
+  ],
+  "homepage": "https://github.com/davidgut1982/lore-mcp",
+  "repository": "https://github.com/davidgut1982/lore-mcp"
+}
