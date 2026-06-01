@@ -24,12 +24,16 @@ Config (config.yaml plugins.lore, or plugins/lore/config.json):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generic, Optional, TypeVar
+
+_T = TypeVar("_T")
 
 # Hermes interfaces. On CT 133 these resolve to the real hermes-agent
 # modules; in local tests they resolve to tests/_hermes_stubs/ (wired by
@@ -120,6 +124,54 @@ LORE_REMEMBER_SCHEMA = {
 
 DEFAULT_MEMORY_TOPIC = "hermes-memory"
 
+# User-preference recall. Prefs (name/location/vehicle/etc.) change rarely,
+# so the kb_list + N×kb_get needed to surface them is wasteful to repeat every
+# turn. We cache the rendered pref lines in-process with a TTL and bust the
+# cache on any write that touches the prefs topic. Disabled by default so the
+# baseline prefetch behavior (semantic recall only) is unchanged; flip
+# ``prefs_enabled`` in config to surface prefs.
+PREFS_TOPIC = "hermes-user-prefs"
+PREFS_CACHE_TTL = 300.0  # seconds
+PREFS_LIST_LIMIT = 20
+
+# Number of recall hits whose full content is fetched for the prefetch block.
+RECALL_TOP_K = 5
+
+
+class _TTLCache(Generic[_T]):
+    """Tiny single-slot TTL cache with explicit invalidation.
+
+    Stores one value (the rendered pref lines) with a monotonic expiry. Used
+    instead of functools.lru_cache so we can both honor a TTL *and*
+    invalidate-on-write when a prefs entry is added/updated.
+    """
+
+    def __init__(self, ttl: float) -> None:
+        self._ttl = ttl
+        self._value: _T | None = None
+        self._expires_at: float = 0.0
+        self._set: bool = False
+
+    def get(self) -> tuple[bool, _T | None]:
+        """Return (hit, value). ``hit`` is False on miss or expiry."""
+        if not self._set:
+            return False, None
+        if time.monotonic() >= self._expires_at:
+            self._set = False
+            self._value = None
+            return False, None
+        return True, self._value
+
+    def set(self, value: _T) -> None:
+        self._value = value
+        self._expires_at = time.monotonic() + self._ttl
+        self._set = True
+
+    def invalidate(self) -> None:
+        self._set = False
+        self._value = None
+        self._expires_at = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -153,9 +205,19 @@ class LoreMemoryProvider(MemoryProvider):
         self._recall_mode = self._config.get("recall_mode", "hybrid")
         self._write_frequency = self._config.get("write_frequency", "turn")
         try:
-            self._dedup_threshold = float(self._config.get("dedup_threshold", DEDUP_THRESHOLD))
+            self._dedup_threshold = float(
+                self._config.get("dedup_threshold", DEDUP_THRESHOLD)
+            )
         except (TypeError, ValueError):
             self._dedup_threshold = DEDUP_THRESHOLD
+        # Pref-cache knobs (config-driven; see plugin.yaml lore namespace).
+        self._prefs_enabled = bool(self._config.get("prefs_enabled", False))
+        self._prefs_topic = self._config.get("prefs_topic", PREFS_TOPIC)
+        try:
+            ttl = float(self._config.get("prefs_cache_ttl", PREFS_CACHE_TTL))
+        except (TypeError, ValueError):
+            ttl = PREFS_CACHE_TTL
+        self._prefs_cache: _TTLCache[list[str]] = _TTLCache(ttl)
         self._client: LoreClient | None = None
         self._session_id: str = ""
         self._captured_turns: list[dict[str, str]] = []
@@ -220,51 +282,137 @@ class LoreMemoryProvider(MemoryProvider):
             return ""
         if not self._client.is_available():
             return ""
+
+        # Run the recall query and the (cached) prefs lookup concurrently so
+        # their round-trips overlap instead of running serially.
+        recall_lines, pref_lines = self._gather_recall_and_prefs(query)
+
+        if not recall_lines and not pref_lines:
+            return ""
+
+        # The guard above guarantees at least one of recall/pref is non-empty,
+        # so ``sections`` is always populated here (no empty-body branch needed).
+        sections: list[str] = []
+        if pref_lines:
+            sections.append("### User preferences\n\n" + "\n\n".join(pref_lines))
+        if recall_lines:
+            sections.append("\n\n".join(recall_lines))
+        body = "## Recalled from Lore\n\n" + "\n\n".join(sections)
+        return f"{MEMORY_FENCE_START}\n{body}\n{MEMORY_FENCE_END}"
+
+    def _gather_recall_and_prefs(self, query: str) -> tuple[list[str], list[str]]:
+        """Fetch recall hits and prefs concurrently; return rendered lines.
+
+        Both branches run the blocking httpx client in worker threads under a
+        single event loop, so the recall search and the prefs lookup overlap.
+        Each branch degrades to an empty list on error — recall is
+        best-effort and never raises into the agent.
+        """
+
+        async def _run() -> tuple[list[str], list[str]]:
+            return await asyncio.gather(
+                asyncio.to_thread(self._recall_lines, query),
+                asyncio.to_thread(self._pref_lines),
+            )
+
         try:
-            results = self._client.kb_search(
-                query, search_mode=self._recall_mode, topic=None, top_k=5
+            return asyncio.run(_run())
+        except Exception as exc:  # noqa: BLE001 - prefetch is best-effort
+            logger.debug("Lore prefetch gather failed: %s", exc)
+            return [], []
+
+    def _recall_lines(self, query: str) -> list[str]:
+        """Semantic/hybrid recall: search then batch-fetch content for hits."""
+        client = self._client
+        if client is None:
+            return []
+        try:
+            results = client.kb_search(
+                query, search_mode=self._recall_mode, topic=None, top_k=RECALL_TOP_K
             )
         except Exception as exc:  # noqa: BLE001 - recall is best-effort
-            logger.debug("Lore prefetch failed: %s", exc)
-            return ""
+            logger.debug("Lore recall search failed: %s", exc)
+            return []
         if not results:
-            return ""
-        lines = []
-        for r in results:
+            return []
+        return self._render_entries(results)
+
+    def _pref_lines(self) -> list[str]:
+        """Rendered user-preference lines, served from a TTL cache.
+
+        Returns [] unless ``prefs_enabled`` is set. On a cache miss, lists the
+        prefs topic and batch-fetches content in one shot, then caches the
+        rendered lines for ``prefs_cache_ttl`` seconds. Invalidated on any
+        write touching the prefs topic (see _maybe_invalidate_prefs).
+        """
+        if not self._prefs_enabled or self._client is None:
+            return []
+        hit, cached = self._prefs_cache.get()
+        if hit and cached is not None:
+            return cached
+        try:
+            entries = self._client.kb_list(self._prefs_topic, limit=PREFS_LIST_LIMIT)
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            logger.debug("Lore prefs list failed: %s", exc)
+            return []
+        lines = self._render_entries(entries) if entries else []
+        self._prefs_cache.set(lines)
+        return lines
+
+    def _render_entries(self, entries: list[dict[str, Any]]) -> list[str]:
+        """Render KB entries to fenced-block lines, batch-fetching content.
+
+        kb_search/kb_list results omit ``content``, so any entry lacking it has
+        its full body fetched via a SINGLE kb_get_batch call (one round-trip,
+        or concurrent kb_get under the hood) rather than N sequential kb_get.
+        Truncation (400 chars + ellipsis) and the ``**[topic] title**`` header
+        format are preserved exactly.
+        """
+        client = self._client
+        if client is None:
+            return []
+        # Identify which entries still need full content fetched.
+        need_ids = [
+            e.get("kb_id", "")
+            for e in entries
+            if not e.get("content") and e.get("kb_id")
+        ]
+        fetched: dict[str, str] = {}
+        if need_ids:
+            try:
+                rows = client.kb_get_batch(need_ids)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.warning("prefetch kb_get_batch failed: %s", exc)
+                rows = []
+            for kid, row in zip(need_ids, rows):
+                if isinstance(row, dict):
+                    fetched[kid] = (row.get("content") or "").strip()
+
+        lines: list[str] = []
+        for r in entries:
             title = r.get("title") or r.get("kb_id", "")
             topic = r.get("topic", "")
             prefix = f"[{topic}] " if topic else ""
             entry_text = f"**{prefix}{title}**"
-            # kb_search list results omit content — fetch the full entry so
-            # the model sees actual stored facts, not just titles.
-            content = r.get("content", "")
+            content = (r.get("content") or "").strip()
             if not content:
-                kb_id = r.get("kb_id", "")
-                if kb_id:
-                    # Use a short-lived client with a 2s timeout so N kb_get
-                    # calls in prefetch cannot block longer than 2s each.
-                    try:
-                        fast_client = type(self._client)(self._lore_url, timeout=2.0)
-                        full = fast_client.kb_get(kb_id)
-                        content = (full.get("content") or "").strip()
-                    except Exception as exc:  # noqa: BLE001 - best-effort
-                        logger.warning("prefetch kb_get(%s) failed: %s", kb_id, exc)
-                        content = ""
-                else:
-                    logger.debug("prefetch: kb_id missing for result %s", r)
+                content = fetched.get(r.get("kb_id", ""), "")
             if content:
                 truncated = content[:400] + ("…" if len(content) > 400 else "")
                 entry_text += f"\n{truncated}"
             lines.append(entry_text)
-        if lines:
-            body = "## Recalled from Lore\n\n" + "\n\n".join(lines)
-        else:
-            body = "## Recalled from Lore\n\n(No relevant entries found)"
-        return f"{MEMORY_FENCE_START}\n{body}\n{MEMORY_FENCE_END}"
+        return lines
+
+    def _maybe_invalidate_prefs(self, topic: str | None) -> None:
+        """Bust the prefs cache when a write touches the prefs topic."""
+        if topic and topic == self._prefs_topic:
+            self._prefs_cache.invalidate()
 
     # -- write ---------------------------------------------------------------
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(
+        self, user_content: str, assistant_content: str, *, session_id: str = ""
+    ) -> None:
         # Capture raw turn for persistence. No LLM call.
         # Strip injected memory so recalled context is never re-stored.
         user_clean = strip_memory_fence(user_content or "").strip()
@@ -321,10 +469,15 @@ class LoreMemoryProvider(MemoryProvider):
             topic=CONVERSATIONS_TOPIC,
             title=title,
             content=content,
-            tags=["hermes-session", self._session_id] if self._session_id else ["hermes-session"],
+            tags=["hermes-session", self._session_id]
+            if self._session_id
+            else ["hermes-session"],
             author="hermes",
             threshold=self._dedup_threshold,
         )
+        # No-op for the conversations topic, but keeps invalidation correct if
+        # this path is ever pointed at the prefs topic.
+        self._maybe_invalidate_prefs(CONVERSATIONS_TOPIC)
 
     # -- tools ---------------------------------------------------------------
 
@@ -355,6 +508,9 @@ class LoreMemoryProvider(MemoryProvider):
                 author="hermes",
                 threshold=self._dedup_threshold,
             )
+            # Bust the prefs cache if this write touched the prefs topic so the
+            # next prefetch re-reads fresh prefs instead of stale cached lines.
+            self._maybe_invalidate_prefs(topic)
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             return tool_error(str(exc))
@@ -387,6 +543,27 @@ class LoreMemoryProvider(MemoryProvider):
                     "near-duplicate (higher = more similar, hybrid mode)"
                 ),
                 "default": str(DEDUP_THRESHOLD),
+            },
+            {
+                "key": "prefs_enabled",
+                "description": (
+                    "Surface cached user preferences (topic prefs_topic) in the "
+                    "prefetch block. Off by default to keep recall-only behavior."
+                ),
+                "default": False,
+            },
+            {
+                "key": "prefs_topic",
+                "description": "KB topic holding durable user preferences",
+                "default": PREFS_TOPIC,
+            },
+            {
+                "key": "prefs_cache_ttl",
+                "description": (
+                    "Seconds to cache rendered user preferences in-process "
+                    "(invalidated on any write to prefs_topic)"
+                ),
+                "default": str(PREFS_CACHE_TTL),
             },
         ]
 
