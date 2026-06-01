@@ -47,6 +47,17 @@ CREATE INDEX IF NOT EXISTS idx_kb_entries_content_search
 CREATE INDEX IF NOT EXISTS idx_kb_entries_title_search
     ON knowledge.kb_entries USING GIN(to_tsvector('english', title));
 
+-- FTS: combined English title+content expression index (matches fts_search_postgres WHERE clause exactly)
+CREATE INDEX IF NOT EXISTS idx_kb_entries_fts_english_combined
+    ON knowledge.kb_entries
+    USING gin(
+        to_tsvector('english',
+            coalesce(title, '') || ' ' || coalesce(content, ''))
+    );
+
+-- Planner tuning: SSD-appropriate random I/O cost (default 4.0 causes GIN index avoidance)
+ALTER DATABASE lore SET random_page_cost = 1.1;
+
 CREATE TABLE IF NOT EXISTS knowledge.kb_doc_sync (
     doc_path     TEXT PRIMARY KEY,
     doc_hash     TEXT NOT NULL,

@@ -29,6 +29,7 @@ migration 010.
 from __future__ import annotations
 
 import inspect
+import re
 from pathlib import Path
 
 from lore import db_client
@@ -118,3 +119,17 @@ def test_migration_index_statement_uses_combined_expression() -> None:
     index_stmts = [s for s in statements if INDEX_NAME in s]
     assert len(index_stmts) == 1, f"expected one index statement, got {index_stmts}"
     assert COMBINED_EXPRESSION in index_stmts[0]
+
+
+def test_ci_bootstrap_schema_contains_combined_index() -> None:
+    """ci_bootstrap_schema.sql must contain a CREATE INDEX for the combined FTS index."""
+    bootstrap_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "ci_bootstrap_schema.sql"
+    )
+    assert bootstrap_path.is_file()
+    text = bootstrap_path.read_text()
+    assert re.search(
+        r"CREATE\s+INDEX\b.*?\bidx_kb_entries_fts_english_combined\b",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ), "ci_bootstrap_schema.sql must contain a CREATE INDEX for idx_kb_entries_fts_english_combined"
