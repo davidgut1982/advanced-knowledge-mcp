@@ -13,6 +13,7 @@ config_namespace: lore
 config:
   # Per-turn prefetch tuning. recall_mode/dedup_threshold/write_frequency are
   # documented in get_config_schema(); these are the prefs-cache knobs.
+  recall_mode: semantic        # pgvector ANN (~0.05s) vs hybrid tsvector+pgvector (~4s); semantic is 80× faster and better for conceptual recall
   prefs_enabled: false        # surface cached user prefs in the recall block
   prefs_topic: hermes-user-prefs
   prefs_cache_ttl: 300        # seconds; invalidated on writes to prefs_topic
