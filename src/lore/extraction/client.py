@@ -24,10 +24,9 @@ import os
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
 
 from .prompts import EXTRACTION_PROMPT_V1
-from .schema import ExtractionResult, MemoryCandidate
+from .schema import ExtractionResult
 
 logger = logging.getLogger(__name__)
 
@@ -180,22 +179,9 @@ class ExtractionClient:
             logger.warning("Extraction response was not valid JSON: %s", exc)
             return ExtractionResult()
 
-        # Partial-parse fallback: validate each candidate independently so a
-        # single bad enum/schema (e.g. an LLM hallucinating type="challenge")
-        # drops only that candidate instead of discarding the whole batch.
-        if not isinstance(data, dict):
-            logger.warning("Extraction JSON was not an object: %r", data)
+        try:
+            result: ExtractionResult = ExtractionResult.model_validate(data)
+        except Exception as exc:  # noqa: BLE001 - pydantic ValidationError + others
+            logger.warning("Extraction JSON failed schema validation: %s", exc)
             return ExtractionResult()
-        raw_memories = data.get("memories", [])
-        if not isinstance(raw_memories, list):
-            logger.warning("Extraction 'memories' field was not a list: %r", raw_memories)
-            return ExtractionResult()
-
-        valid_candidates: list[MemoryCandidate] = []
-        for candidate in raw_memories:
-            try:
-                valid_candidates.append(MemoryCandidate.model_validate(candidate))
-            except ValidationError:
-                logger.debug("Skipping invalid candidate (bad type or schema): %s", candidate)
-                continue
-        return ExtractionResult(memories=valid_candidates)
+        return result

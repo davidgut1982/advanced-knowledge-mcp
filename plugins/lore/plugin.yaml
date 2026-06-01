@@ -17,5 +17,34 @@ config:
   prefs_enabled: false        # surface cached user prefs in the recall block
   prefs_topic: hermes-user-prefs
   prefs_cache_ttl: 300        # seconds; invalidated on writes to prefs_topic
+  auto_extract:
+    enabled: false              # set true + OPENROUTER_API_KEY to activate
+    provider: openrouter          # options: openrouter, cerebras
+    model: meta-llama/llama-3.1-8b-instruct
+    provider_order:               # openrouter only: backend preference
+      - Groq
+      - Together
+      - Fireworks
+    # --- Cerebras alternative (comment out openrouter block above) ---
+    # provider: cerebras
+    # model: gpt-oss-120b         # 300+ TPS, 91-99% cache hit
+    confidence_threshold: 0.75
+    dedup_similarity_threshold: 0.12   # hybrid kb_search rrf_score (~0.0-0.3, higher = more similar), NOT cosine
+    dry_run: false              # log candidates without writing to KB (for tuning)
+    review_mode: false          # new extractions go to auto-memory-pending topic for approval
+    type_thresholds:            # per-type confidence overrides (optional)
+      user_fact: 0.85
+      system_fact: 0.85
+      preference: 0.80
+      relationship: 0.80
+      goal: 0.75
+      event: 0.70
+    rolling_window: false       # enable mid-session extraction for long sessions
+    rolling_stride: 15          # fire extraction every N new turns
+    rolling_overlap: 5          # look back N turns into prev window for context
+    min_turns: 3
+    max_turns: 20           # cap: use last N turns; prevents huge sessions from blowing context
+    min_turn_chars: 20      # skip turns shorter than this after cleaning (noise filter)
+    max_turn_chars: 1200    # truncate individual turns to this length
 requires:
   - httpx

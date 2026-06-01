@@ -205,9 +205,7 @@ class LoreMemoryProvider(MemoryProvider):
         self._recall_mode = self._config.get("recall_mode", "hybrid")
         self._write_frequency = self._config.get("write_frequency", "turn")
         try:
-            self._dedup_threshold = float(
-                self._config.get("dedup_threshold", DEDUP_THRESHOLD)
-            )
+            self._dedup_threshold = float(self._config.get("dedup_threshold", DEDUP_THRESHOLD))
         except (TypeError, ValueError):
             self._dedup_threshold = DEDUP_THRESHOLD
         # Pref-cache knobs (config-driven; see plugin.yaml lore namespace).
@@ -221,6 +219,13 @@ class LoreMemoryProvider(MemoryProvider):
         self._client: LoreClient | None = None
         self._session_id: str = ""
         self._captured_turns: list[dict[str, str]] = []
+        # Rolling-window extraction state. _session_turns accumulates EVERY turn
+        # for the lifetime of the session (independent of write_frequency, which
+        # clears _captured_turns after each per-turn flush). _last_extracted_turn
+        # is the index into _session_turns at the last mid-session extraction;
+        # the slice [_last_extracted_turn:] is the not-yet-extracted tail.
+        self._session_turns: list[dict[str, str]] = []
+        self._last_extracted_turn: int = 0
 
     # -- identity ------------------------------------------------------------
 
@@ -265,6 +270,9 @@ class LoreMemoryProvider(MemoryProvider):
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Lore session-switch flush failed: %s", exc)
         self._captured_turns = []
+        # Reset rolling-window accumulators for the new session.
+        self._session_turns = []
+        self._last_extracted_turn = 0
         self._session_id = new_session_id
 
     # -- recall --------------------------------------------------------------
@@ -376,11 +384,7 @@ class LoreMemoryProvider(MemoryProvider):
         if client is None:
             return []
         # Identify which entries still need full content fetched.
-        need_ids = [
-            e.get("kb_id", "")
-            for e in entries
-            if not e.get("content") and e.get("kb_id")
-        ]
+        need_ids = [e.get("kb_id", "") for e in entries if not e.get("content") and e.get("kb_id")]
         fetched: dict[str, str] = {}
         if need_ids:
             try:
@@ -389,9 +393,7 @@ class LoreMemoryProvider(MemoryProvider):
                 logger.warning("prefetch kb_get_batch failed: %s", exc)
                 rows = []
             fetched_rows: dict[str, dict[str, Any]] = {
-                row["kb_id"]: row
-                for row in rows
-                if isinstance(row, dict) and row.get("kb_id")
+                row["kb_id"]: row for row in rows if isinstance(row, dict) and row.get("kb_id")
             }
             for kid in need_ids:
                 row = fetched_rows.get(kid)
@@ -420,23 +422,30 @@ class LoreMemoryProvider(MemoryProvider):
 
     # -- write ---------------------------------------------------------------
 
-    def sync_turn(
-        self, user_content: str, assistant_content: str, *, session_id: str = ""
-    ) -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         # Capture raw turn for persistence. No LLM call.
         # Strip injected memory so recalled context is never re-stored.
         user_clean = strip_memory_fence(user_content or "").strip()
         assistant_clean = (assistant_content or "").strip()
         if not user_clean and not assistant_clean:
             return
-        self._captured_turns.append(
-            {
-                "timestamp": datetime.now(UTC).isoformat(),
-                "session_id": session_id or self._session_id,
-                "user": user_clean,
-                "assistant": assistant_clean,
-            }
-        )
+        turn_record = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "session_id": session_id or self._session_id,
+            "user": user_clean,
+            "assistant": assistant_clean,
+        }
+        self._captured_turns.append(turn_record)
+        # Mirror into the session-long accumulator used by rolling-window
+        # extraction. _captured_turns may be cleared per-turn (write_frequency
+        # "turn"), so it cannot be reused as a session-long history.
+        self._session_turns.append(turn_record)
+        # Fire mid-session extraction if the rolling window is enabled and the
+        # stride has been reached. Fully best-effort; never raises into the agent.
+        try:
+            self._maybe_roll_extract()
+        except Exception as exc:  # noqa: BLE001 - rolling extraction is best-effort
+            logger.debug("Lore rolling extraction trigger failed: %s", exc)
         # write_frequency "turn": persist immediately after each turn.
         # "session" (or any other value): defer until on_session_end. Never
         # raise into the agent — persistence is best-effort.
@@ -449,14 +458,178 @@ class LoreMemoryProvider(MemoryProvider):
                 self._captured_turns = []
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
-        if not self._captured_turns:
+        # True no-op only when the session had no turns at all. _captured_turns
+        # may already be empty (write_frequency "turn" flushes per turn), but
+        # _session_turns still holds the full history that rolling-window
+        # extraction draws from, so guard on both.
+        if not self._captured_turns and not self._session_turns:
+            return
+        if self._captured_turns:
+            try:
+                self._persist_turns()
+            except Exception as exc:  # noqa: BLE001 - never raise into the agent
+                logger.debug("Lore on_session_end flush failed: %s", exc)
+            finally:
+                self._captured_turns = []
+        # Optional automatic memory extraction (off by default). Fire-and-forget
+        # so it never delays session teardown; fully best-effort.
+        #
+        # With the rolling window on, the mid-session passes have already
+        # extracted everything up to _last_extracted_turn, so the session-end
+        # pass only needs the remaining tail (plus an overlap look-back for
+        # context). With it off, behavior is unchanged: pass the full snapshot
+        # and let filter_turns cap it to max_turns.
+        auto = self._config.get("auto_extract", {})
+        if auto.get("rolling_window", False):
+            overlap = int(auto.get("rolling_overlap", 5))
+            start = max(0, self._last_extracted_turn - overlap)
+            remaining = self._session_turns[start:]
+            if not remaining:
+                # The last mid-session fire landed on the final turn — there is
+                # nothing new to extract. Skip the redundant pass but still reset
+                # rolling state so the next session starts clean.
+                self._last_extracted_turn = 0
+                self._session_turns = []
+                return
+            turns_to_extract = remaining
+        else:
+            # Non-rolling: use _session_turns (persists full session history
+            # regardless of write_frequency), not _captured_turns — under
+            # write_frequency="turn" the latter is cleared after every turn and
+            # would be empty here, silently extracting zero memories.
+            turns_to_extract = list(self._session_turns)  # full session history
+        self._maybe_fire_extraction(turns_to_extract)
+        # Reset rolling-window state so the next session starts clean.
+        self._session_turns = []
+        self._last_extracted_turn = 0
+
+    def _maybe_roll_extract(self) -> None:
+        """Fire mid-session extraction if rolling window is on and stride reached.
+
+        No-op unless ``auto_extract.enabled`` AND ``auto_extract.rolling_window``
+        are both set. Extracts the not-yet-extracted tail of _session_turns,
+        looking back ``rolling_overlap`` turns into already-extracted territory
+        for context, every ``rolling_stride`` new turns. Advances the cursor
+        BEFORE firing so a slow extraction task can't double-extract.
+        """
+        auto = self._config.get("auto_extract", {})
+        if not auto.get("enabled", False):
+            return
+        if not auto.get("rolling_window", False):
+            return
+
+        stride = int(auto.get("rolling_stride", 15))
+        overlap = int(auto.get("rolling_overlap", 5))
+
+        turns_since_last = len(self._session_turns) - self._last_extracted_turn
+        if turns_since_last < stride:
+            return
+
+        # Slice: go back `overlap` turns into already-extracted territory so the
+        # extractor has surrounding context for the new turns.
+        start = max(0, self._last_extracted_turn - overlap)
+        window = self._session_turns[start:]
+
+        # Advance the cursor BEFORE firing to prevent double-extraction if the
+        # background task is slow to run. Remember the pre-advance value so a
+        # failed extraction task can roll the cursor back (see Fix 1) — the turns
+        # it covered must not be permanently skipped.
+        pre_advance = self._last_extracted_turn
+        self._last_extracted_turn = len(self._session_turns)
+
+        # Trim turns that will never be needed again, keeping ``overlap`` turns
+        # before the new cursor as the look-back buffer. This bounds memory to
+        # roughly ``stride + overlap`` turns regardless of session length. The
+        # cursor (and the rollback target) shift left by the trimmed count so
+        # they keep pointing at the same logical turns.
+        trim_to = max(0, self._last_extracted_turn - overlap)
+        if trim_to > 0:
+            del self._session_turns[:trim_to]
+            self._last_extracted_turn -= trim_to
+            pre_advance = max(0, pre_advance - trim_to)
+
+        self._maybe_fire_extraction(window, pre_advance=pre_advance)
+
+    def _maybe_fire_extraction(
+        self,
+        captured_turns: list[dict[str, str]],
+        *,
+        pre_advance: int | None = None,
+    ) -> None:
+        """Kick off background memory extraction if enabled in config.
+
+        No-op unless ``auto_extract.enabled`` is set. Imports the extraction
+        pipeline lazily and degrades silently if the lore-mcp package providing
+        it is not importable, so the plugin keeps working without it.
+
+        ``pre_advance`` is the value of ``_last_extracted_turn`` *before* the
+        caller advanced the cursor for this fire. When provided, a failure of
+        the extraction task rolls the cursor back to it so the covered turns are
+        retried rather than permanently skipped. ``None`` (the default) means no
+        cursor was advanced for this fire (e.g. the non-rolling session-end
+        pass), so there is nothing to roll back.
+        """
+        if not self._config.get("auto_extract", {}).get("enabled", False):
+            return
+        if self._client is None or not captured_turns:
             return
         try:
-            self._persist_turns()
-        except Exception as exc:  # noqa: BLE001 - never raise into the agent
-            logger.debug("Lore on_session_end flush failed: %s", exc)
-        finally:
-            self._captured_turns = []
+            from lore.extraction import extract_and_store
+        except Exception as exc:  # noqa: BLE001 - extraction package optional
+            logger.debug("Auto-extraction unavailable (import failed): %s", exc)
+            return
+        # Flatten captured user/assistant turns into role/content turns.
+        turns: list[dict[str, str]] = []
+        for turn in captured_turns:
+            if turn.get("user"):
+                turns.append({"role": "user", "content": turn["user"]})
+            if turn.get("assistant"):
+                turns.append({"role": "assistant", "content": turn["assistant"]})
+        coro = extract_and_store(
+            turns=turns,
+            db_client=self._client,
+            config=self._config,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (synchronous teardown) — run to completion now.
+            # Synchronous path: if it raises, roll back the cursor (when one was
+            # advanced for this fire) so the covered turns are retried, then
+            # swallow (never raise into the agent).
+            try:
+                asyncio.run(coro)
+            except Exception as exc:  # noqa: BLE001 - never raise into the agent
+                if pre_advance is not None:
+                    logger.warning(
+                        "Auto-extraction run failed; rolling back cursor from %d to %d",
+                        self._last_extracted_turn,
+                        pre_advance,
+                    )
+                    self._last_extracted_turn = pre_advance
+                logger.debug("Auto-extraction run failed: %s", exc)
+            return
+
+        # Async path: advancing the cursor happened in the caller before this
+        # task was created. If the background task crashes, roll the cursor back
+        # to ``pre_advance`` so those turns aren't permanently skipped.
+        task = loop.create_task(coro)
+
+        if pre_advance is not None:
+            # Bind the narrowed (non-None) value to a local so the default
+            # argument below is typed ``int`` rather than ``int | None``.
+            rollback_to: int = pre_advance
+
+            def _on_done(t: asyncio.Task, _pa: int = rollback_to) -> None:
+                if t.exception() is not None:
+                    logger.warning(
+                        "Rolling extraction task failed; rolling back cursor from %d to %d",
+                        self._last_extracted_turn,
+                        _pa,
+                    )
+                    self._last_extracted_turn = _pa
+
+            task.add_done_callback(_on_done)
 
     def _persist_turns(self) -> None:
         """Store captured turns to Lore as one structured conversation entry."""
@@ -479,9 +652,7 @@ class LoreMemoryProvider(MemoryProvider):
             topic=CONVERSATIONS_TOPIC,
             title=title,
             content=content,
-            tags=["hermes-session", self._session_id]
-            if self._session_id
-            else ["hermes-session"],
+            tags=["hermes-session", self._session_id] if self._session_id else ["hermes-session"],
             author="hermes",
             threshold=self._dedup_threshold,
         )
