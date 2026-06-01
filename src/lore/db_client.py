@@ -90,6 +90,17 @@ KB_CONTENT_TRGM_INDEX_DDL = (
     "ON knowledge.kb_entries USING gin (content gin_trgm_ops);"
 )
 
+KB_FTS_ENGLISH_COMBINED_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS btree_gin;"
+
+KB_FTS_ENGLISH_COMBINED_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_kb_entries_fts_english_combined"
+    " ON knowledge.kb_entries"
+    " USING gin("
+    "     to_tsvector('english',"
+    "         coalesce(title, '') || ' ' || coalesce(content, ''))"
+    " );"
+)
+
 
 class LocalPostgresClient:
     """
@@ -202,6 +213,20 @@ class LocalPostgresClient:
             cursor.execute(KB_CONTENT_TRGM_EXTENSION_DDL.rstrip(";"))
             cursor.execute(KB_CONTENT_TRGM_INDEX_DDL.rstrip(";"))
             logger.debug("idx_kb_entries_content_trgm ensured")
+
+            # FTS English-config combined index: the fts_search_postgres WHERE
+            # clause matches on to_tsvector('english', coalesce(title,'') || ' '
+            # || coalesce(content,'')), an expression the content-only FTS index
+            # cannot serve — Postgres falls back to seqscan. This expression GIN
+            # index matches the WHERE clause exactly so the FTS leg of hybrid
+            # search uses a Bitmap Index Scan. NON-CONCURRENT form is safe here
+            # (fresh DBs build instantly, IF NOT EXISTS short-circuits); the live
+            # production DB uses the CONCURRENTLY variant in
+            # migrations/011_kb_fts_english_combined_index.sql. Mirrors the
+            # KB_FTS_ENGLISH_COMBINED_* constants (a unit test enforces it).
+            cursor.execute(KB_FTS_ENGLISH_COMBINED_EXTENSION_DDL.rstrip(";"))
+            cursor.execute(KB_FTS_ENGLISH_COMBINED_INDEX_DDL.rstrip(";"))
+            logger.debug("idx_kb_entries_fts_english_combined ensured")
 
             # Detect pgvector extension and version.
             cursor.execute(
