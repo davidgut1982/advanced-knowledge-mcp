@@ -46,7 +46,7 @@ class _FakeAsyncClient:
     async def __aenter__(self):
         return self
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, *_):
         return False
 
     async def post(self, url, *, headers=None, json=None):  # noqa: A002
@@ -57,7 +57,7 @@ class _FakeAsyncClient:
 
 
 def _patch_client(response, recorder):
-    def _factory(*args, **kwargs):
+    def _factory(*_args, **_kwargs):
         return _FakeAsyncClient(response, recorder)
 
     return mock.patch.object(httpx, "AsyncClient", _factory)
