@@ -1102,7 +1102,6 @@
           'enum': list([
             'full',
             'chunked',
-            'summary',
           ]),
           'type': 'string',
         }),
@@ -1164,7 +1163,6 @@
           'enum': list([
             'full',
             'chunked',
-            'summary',
           ]),
           'type': 'string',
         }),
