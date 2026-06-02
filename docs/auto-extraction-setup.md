@@ -3,55 +3,19 @@
 Lore can automatically extract memorable facts from Hermes conversations using a fast
 LLM and store them in your knowledge base.
 
-The default provider is **Cerebras** (direct). OpenRouter is also supported but requires
-explicit configuration.
+The default provider is **OpenRouter**, used as the transport but hard-pinned to Cerebras
+via `provider_order: ["Cerebras"]` (which becomes `provider.only` in the request). Talking
+to Cerebras Cloud directly is also supported as an alternative.
 
 ## Prerequisites
 
 - A Lore MCP server running with PostgreSQL backend
-- A Cerebras API key (recommended) **or** an OpenRouter API key
+- An OpenRouter API key (default) **or** a Cerebras API key
 
-## Option A: Cerebras (default)
+## Option A: OpenRouter (default, pinned to Cerebras)
 
-Cerebras Cloud runs on wafer-scale chips. With 300+ TPS and 91–99% prompt cache hit rate,
-the static extraction system prompt is effectively free after the first call.
-
-### 1. Get a Cerebras API key
-1. Sign up at https://cloud.cerebras.ai
-2. Create an API key
-
-### 2. Set the environment variable
-
-```bash
-export CEREBRAS_API_KEY=csk-...
-```
-
-Or add to your `.env` file:
-```
-CEREBRAS_API_KEY=csk-...
-```
-
-### 3. Enable in plugin config
-
-In your `plugin.yaml` (or Hermes plugin config):
-
-```yaml
-config:
-  auto_extract:
-    enabled: true
-    model: gpt-oss-120b        # default; omit to use this automatically
-    confidence_threshold: 0.75
-    dedup_similarity_threshold: 0.12
-    min_turns: 3
-```
-
-No `provider` key is needed — Cerebras is the default.
-
-## Option B: OpenRouter (with Cerebras routing)
-
-If you are already using OpenRouter and prefer to route through it, set `provider: openrouter`.
-The request will use `provider.only: ["Cerebras"]` — a hard pin that fails rather than
-silently falling through to a different provider.
+OpenRouter is used as the transport, but the request is hard-pinned to Cerebras via
+`provider.only` so it fails loudly rather than silently routing to a different backend.
 
 ### 1. Get an OpenRouter API key
 1. Sign up at https://openrouter.ai
@@ -63,13 +27,19 @@ silently falling through to a different provider.
 export OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
+Or add to your `.env` file:
+```
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
 ### 3. Enable in plugin config
+
+In your `plugin.yaml` (or Hermes plugin config):
 
 ```yaml
 config:
   auto_extract:
     enabled: true
-    provider: openrouter
     model: meta-llama/llama-3.1-8b-instruct
     provider_order:
       - Cerebras    # hard-pinned via "only" — will not fall through to other providers
@@ -78,14 +48,47 @@ config:
     min_turns: 3
 ```
 
+No `provider` key is needed — `openrouter` is the default. The `provider_order` defaults
+to `["Cerebras"]` if omitted.
+
 Note: `provider_order` maps to `provider.only` in the OpenRouter request body, not
 `provider.order`. This means the request will return an error rather than silently
 routing to Groq, Together, or Fireworks if Cerebras is unavailable.
 
+## Option B: Cerebras (direct)
+
+If you prefer to talk to Cerebras Cloud directly instead of through OpenRouter, set
+`provider: cerebras`. Cerebras Cloud runs on wafer-scale chips. With 300+ TPS and 91–99%
+prompt cache hit rate, the static extraction system prompt is effectively free after the
+first call.
+
+### 1. Get a Cerebras API key
+1. Sign up at https://cloud.cerebras.ai
+2. Create an API key
+
+### 2. Set the environment variable
+
+```bash
+export CEREBRAS_API_KEY=csk-...
+```
+
+### 3. Enable in plugin config
+
+```yaml
+config:
+  auto_extract:
+    enabled: true
+    provider: cerebras
+    model: gpt-oss-120b
+    confidence_threshold: 0.75
+    dedup_similarity_threshold: 0.12
+    min_turns: 3
+```
+
 ## How it works
 
 At the end of each session, Lore asynchronously:
-1. Sends the conversation turns to gpt-oss-120b via Cerebras (or OpenRouter)
+1. Sends the conversation turns to a fast model via OpenRouter pinned to Cerebras (or Cerebras direct)
 2. Extracts facts, preferences, goals, events, and system facts
 3. Deduplicates against your existing KB using vector similarity
 4. Writes new entries or updates existing ones

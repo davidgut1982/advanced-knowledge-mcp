@@ -7,8 +7,9 @@ structured JSON response into an
 Two OpenAI-compatible providers are supported, selected via the
 ``provider`` config key:
 
-* ``cerebras`` (default) — gpt-oss-120b on Cerebras Cloud (300+ TPS, 91-99% prompt cache).
-* ``openrouter`` — Llama 3.1 8B routed exclusively through Cerebras via provider.only pin.
+* ``openrouter`` (default) — used as the transport, but hard-pinned to Cerebras
+  via ``provider.only`` so requests fail loudly rather than silently routing elsewhere.
+* ``cerebras`` — gpt-oss-120b on Cerebras Cloud directly (300+ TPS, 91-99% prompt cache).
 
 Extraction is *best-effort*: every failure mode (missing API key, HTTP error,
 malformed JSON, unknown provider) is logged and converted to an empty result.
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
-DEFAULT_PROVIDER = "cerebras"
+DEFAULT_PROVIDER = "openrouter"
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 CEREBRAS_DEFAULT_MODEL = "gpt-oss-120b"
 # Default provider order for OpenRouter routing. Using "only" (not "order") for a hard pin
@@ -46,8 +47,8 @@ _REQUEST_TIMEOUT = 30.0
 class ExtractionClient:
     """Thin async wrapper over an OpenAI-compatible chat-completions endpoint.
 
-    Dispatches to Cerebras (default) or OpenRouter based on the ``provider``
-    config key.
+    Dispatches to OpenRouter (default, hard-pinned to Cerebras via
+    ``provider.only``) or Cerebras directly, based on the ``provider`` config key.
     """
 
     def __init__(self, config: dict[str, Any] | None = None):
