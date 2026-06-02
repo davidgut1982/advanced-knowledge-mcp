@@ -123,7 +123,7 @@ class SmokeClient:
         body_str: str | None = None
         for line in raw.splitlines():
             if line.startswith("data: "):
-                body_str = line[len("data: ") :]
+                body_str = line[len("data: "):]
                 break
         if body_str is None:
             body_str = raw
@@ -162,8 +162,6 @@ class SmokeClient:
         What: Extracts data on ok=True, raises SmokeClientError on ok=False.
         Test: Pass {ok: False, error: 'boom'}; assert SmokeClientError raised.
         """
-        if not isinstance(inner, dict):
-            return inner  # type: ignore[return-value]
         if inner.get("ok") is False:
             raise SmokeClientError(
                 code=-1,
