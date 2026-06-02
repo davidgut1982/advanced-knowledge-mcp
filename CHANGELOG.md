@@ -21,10 +21,12 @@ All notable changes to this project are documented here.
 - **`multi_search` fallback** (issue #24): `handle_kb_search` now calls `default_search_mode()` which defaults to `"hybrid"`, so hybrid search activates when FTS yields zero results instead of returning empty.
 - **Plugin async safety** (PR #32): `gather(return_exceptions=True)`, `kb_id` dict re-key, `isinstance` py3.9 compatibility.
 - **Makefile e2e port**: `e2e-staging`, `e2e-local`, and `soak-staging` targets corrected to port `5556` (matches deployed `lore.service` config).
+- **`auto_extract` dry_run guard** (PR #40): `dry_run=True` now correctly prevents all writes while still running the full extraction and dedup pipeline. Candidate decisions surfaced via `summary["candidates"]` for inspection.
 
 ### Testing
 - Integration test bootstrap validation (PR #31): fresh-env bootstrap, FTS index, `kb_get_batch`, hybrid query plan assertions.
 - 996 unit tests + 45 Postgres integration tests passing.
+- `TestCrossModeConsistency` corpus seeding fixture (PR #40): class-scoped fixture seeds required KB entries on any clean staging environment and tears down after; test now passes without pre-seeded data.
 
 ### Documentation
 - `docs/auto-extraction-setup.md`: complete setup guide for both providers — API key setup, config tuning table, inspecting and removing auto-extracted entries.
