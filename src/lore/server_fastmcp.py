@@ -533,7 +533,7 @@ def snapshot_config(config_name: str, config_data: dict) -> str:
 @mcp.tool(description="Ingest single markdown file into KB with change detection")
 def kb_ingest_doc(
     doc_path: str,
-    strategy: Literal["full", "chunked", "summary"] = "chunked",
+    strategy: Literal["full", "chunked"] = "chunked",
     chunk_size: int = 2000,
     tags: str | list[str] | None = None,
     overwrite: bool = False,
@@ -557,7 +557,7 @@ def kb_ingest_doc(
 async def kb_ingest_dir(
     dir_path: str,
     pattern: str = "*.md",
-    strategy: Literal["full", "chunked", "summary"] = "chunked",
+    strategy: Literal["full", "chunked"] = "chunked",
     recursive: bool = True,
     exclude_patterns: str | list[str] | None = None,
     author: str | None = None,
