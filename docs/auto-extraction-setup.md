@@ -1,22 +1,27 @@
 # Automatic Memory Extraction Setup
 
 Lore can automatically extract memorable facts from Hermes conversations using a fast
-LLM (Llama 3.1 8B via OpenRouter) and store them in your knowledge base.
+LLM and store them in your knowledge base.
+
+The default provider is **OpenRouter**, used as the transport but hard-pinned to Cerebras
+via `provider_order: ["Cerebras"]` (which becomes `provider.only` in the request). Talking
+to Cerebras Cloud directly is also supported as an alternative.
 
 ## Prerequisites
 
 - A Lore MCP server running with PostgreSQL backend
-- An OpenRouter API key (free tier is sufficient)
+- An OpenRouter API key (default) **or** a Cerebras API key
 
-## Option A: OpenRouter
+## Option A: OpenRouter (default, pinned to Cerebras)
+
+OpenRouter is used as the transport, but the request is hard-pinned to Cerebras via
+`provider.only` so it fails loudly rather than silently routing to a different backend.
 
 ### 1. Get an OpenRouter API key
-
 1. Sign up at https://openrouter.ai
 2. Create a key at https://openrouter.ai/keys
-3. Free tier: suitable for personal use (~$0.0001 per extraction call)
 
-## 2. Set the environment variable
+### 2. Set the environment variable
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
@@ -27,7 +32,7 @@ Or add to your `.env` file:
 OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-## 3. Enable in plugin config
+### 3. Enable in plugin config
 
 In your `plugin.yaml` (or Hermes plugin config):
 
@@ -37,43 +42,53 @@ config:
     enabled: true
     model: meta-llama/llama-3.1-8b-instruct
     provider_order:
-      - Groq        # ~800 tok/s — fastest
-      - Together    # fallback
-      - Fireworks   # fallback
-    confidence_threshold: 0.75   # 0–1; higher = fewer but more reliable memories
-    dedup_similarity_threshold: 0.85  # cosine similarity for merge vs new entry
-    min_turns: 3                 # skip single-exchange sessions
+      - Cerebras    # hard-pinned via "only" — will not fall through to other providers
+    confidence_threshold: 0.75
+    dedup_similarity_threshold: 0.85
+    min_turns: 3
 ```
 
-## Option B: Cerebras (recommended if already using Cerebras for Hermes)
+No `provider` key is needed — `openrouter` is the default. The `provider_order` defaults
+to `["Cerebras"]` if omitted.
 
-Cerebras Cloud runs on wafer-scale chips. With 300+ TPS and 91–99% prompt cache hit rate,
-the static extraction system prompt is effectively free after the first call.
+Note: `provider_order` maps to `provider.only` in the OpenRouter request body, not
+`provider.order`. This means the request will return an error rather than silently
+routing to Groq, Together, or Fireworks if Cerebras is unavailable.
 
-### Get a Cerebras API key
+## Option B: Cerebras (direct)
+
+If you prefer to talk to Cerebras Cloud directly instead of through OpenRouter, set
+`provider: cerebras`. Cerebras Cloud runs on wafer-scale chips. With 300+ TPS and 91–99%
+prompt cache hit rate, the static extraction system prompt is effectively free after the
+first call.
+
+### 1. Get a Cerebras API key
 1. Sign up at https://cloud.cerebras.ai
 2. Create an API key
 
-### Set environment variable
+### 2. Set the environment variable
+
 ```bash
 export CEREBRAS_API_KEY=csk-...
 ```
 
-### Configure
+### 3. Enable in plugin config
+
 ```yaml
-auto_extract:
-  enabled: true
-  provider: cerebras
-  model: gpt-oss-120b
-  confidence_threshold: 0.75
-  dedup_similarity_threshold: 0.12
-  min_turns: 3
+config:
+  auto_extract:
+    enabled: true
+    provider: cerebras
+    model: gpt-oss-120b
+    confidence_threshold: 0.75
+    dedup_similarity_threshold: 0.12
+    min_turns: 3
 ```
 
 ## How it works
 
 At the end of each session, Lore asynchronously:
-1. Sends the conversation turns to Llama 3.1 8B via OpenRouter (Groq backend)
+1. Sends the conversation turns to a fast model via OpenRouter pinned to Cerebras (or Cerebras direct)
 2. Extracts facts, preferences, goals, events, and system facts
 3. Deduplicates against your existing KB using vector similarity
 4. Writes new entries or updates existing ones
@@ -117,5 +132,6 @@ to the agent until approved.
 
 ## Disabling
 
-Set `enabled: false` or remove `OPENROUTER_API_KEY`. The plugin degrades gracefully —
-manual `kb_add` continues to work as before.
+Set `enabled: false` or remove the relevant API key (`CEREBRAS_API_KEY` or
+`OPENROUTER_API_KEY`). The plugin degrades gracefully — manual `kb_add` continues to work
+as before.

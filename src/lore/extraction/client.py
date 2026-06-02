@@ -7,8 +7,9 @@ structured JSON response into an
 Two OpenAI-compatible providers are supported, selected via the
 ``provider`` config key:
 
-* ``openrouter`` (default) — Llama 3.1 8B routed through Groq/Together/Fireworks.
-* ``cerebras`` — gpt-oss-120b on Cerebras Cloud (300+ TPS, 91-99% prompt cache).
+* ``openrouter`` (default) — used as the transport, but hard-pinned to Cerebras
+  via ``provider.only`` so requests fail loudly rather than silently routing elsewhere.
+* ``cerebras`` — gpt-oss-120b on Cerebras Cloud directly (300+ TPS, 91-99% prompt cache).
 
 Extraction is *best-effort*: every failure mode (missing API key, HTTP error,
 malformed JSON, unknown provider) is logged and converted to an empty result.
@@ -35,7 +36,9 @@ CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 CEREBRAS_DEFAULT_MODEL = "gpt-oss-120b"
-DEFAULT_PROVIDER_ORDER = ["Groq", "Together", "Fireworks"]
+# Default provider order for OpenRouter routing. Using "only" (not "order") for a hard pin
+# so the request fails rather than silently routing to a different provider.
+DEFAULT_PROVIDER_ORDER = ["Cerebras"]
 # Llama 3.1 8B is the largest model this pipeline uses on purpose — extraction
 # must stay fast and cheap. Do not raise this to a reasoning/larger model.
 _REQUEST_TIMEOUT = 30.0
@@ -44,8 +47,8 @@ _REQUEST_TIMEOUT = 30.0
 class ExtractionClient:
     """Thin async wrapper over an OpenAI-compatible chat-completions endpoint.
 
-    Dispatches to OpenRouter (default) or Cerebras based on the ``provider``
-    config key.
+    Dispatches to OpenRouter (default, hard-pinned to Cerebras via
+    ``provider.only``) or Cerebras directly, based on the ``provider`` config key.
     """
 
     def __init__(self, config: dict[str, Any] | None = None):
@@ -118,7 +121,7 @@ class ExtractionClient:
             }
             body = {
                 "model": model,
-                "provider": {"order": list(provider_order)},
+                "provider": {"only": list(provider_order)},
                 "messages": messages,
                 "response_format": {"type": "json_object"},
                 "temperature": 0.1,
