@@ -149,6 +149,16 @@ make e2e-staging
 
 **Note on e2e-staging:** This target requires internal DNS resolution of the `lore-staging` hostname and is only accessible from the internal network. External contributors cannot use it. Use `make e2e-local` to test against a local instance.
 
+### Layer 4: Smoke Tests (Post-Deployment Only)
+
+Smoke tests are **not for CI** — they run against live deployed instances after a deployment to verify the critical path works before declaring the release done.
+
+```bash
+make smoke LORE_URL=http://<host>:<port>
+```
+
+See [Deployment Verification](#deployment-verification) below for when and how to run them. Do not add smoke tests to the CI pipeline — they require a running server with a real database.
+
 ### Running All Tests Locally
 
 ```bash
@@ -457,7 +467,26 @@ After the release PR is merged to main:
 
 This triggers `publish.yml`, which builds the package with `uv build` and publishes to PyPI via trusted publishing (no API key needed). It completes in 2–3 minutes.
 
-**8. Verify**
+**8. Deploy and verify each node**
+
+After deploying to each node, run the smoke test before moving on:
+
+```bash
+# Staging (CT 200, port 5556)
+make smoke LORE_URL=http://<staging-node>:5556
+
+# Production (CT 121, port 5555)
+make smoke LORE_URL=http://<prod-node>:5555
+```
+
+All steps must print **PASS** and the script must exit 0 before you declare the deployment done.
+
+**Rules:**
+1. Do not deploy to prod until the staging smoke test passes.
+2. If any step fails, treat the deployment as failed — roll back and investigate.
+3. The smoke test exercises the live database, not a mock. A passing run confirms the DB connection, schema, and write/read/delete path are all functional.
+
+**9. Verify PyPI publication**
 
 ```bash
 pip install lore-knowledge-mcp==X.Y.Z
@@ -476,6 +505,36 @@ If a release breaks production:
 
 The broken version remains on PyPI but won't be installed unless explicitly requested.
 
+## Deployment Verification
+
+After every deployment — staging or production — run the smoke test before declaring it done.
+
+```bash
+# Generic (override URL as needed)
+make smoke LORE_URL=http://<node>:<port>
+
+# Convenience targets
+make smoke-staging   # CT 200, port 5556
+make smoke-prod      # CT 121, port 5555
+```
+
+The smoke test (see `scripts/smoke_test.py`) runs five steps:
+
+| Step | What it checks |
+|------|----------------|
+| `GET /health` | Server process is up |
+| `kb_add` | DB connection + write path |
+| `kb_search` | FTS indexing + search path |
+| `kb_get` | Direct lookup by ID |
+| `kb_get_batch` | Batch-get endpoint |
+
+Cleanup (`kb_delete`) runs best-effort after every test run.
+
+**Rules:**
+- All steps must print **PASS** before the deployment is declared done.
+- Do not deploy to prod until staging smoke passes.
+- If any step fails, roll back and investigate — do not push forward.
+
 ## Makefile Reference
 
 | Target | What it does |
@@ -488,6 +547,9 @@ The broken version remains on PyPI but won't be installed unless explicitly requ
 | `make e2e-staging` | End-to-end tests against lore-staging (internal only) |
 | `make e2e-local` | End-to-end tests against local instance |
 | `make soak-staging` | Long-running soak test (internal only) |
+| `make smoke` | Post-deployment smoke test (LORE_URL=...) |
+| `make smoke-staging` | Smoke test against staging (CT 200, port 5556) |
+| `make smoke-prod` | Smoke test against production (CT 121, port 5555) |
 
 **Note:** `make` targets use `venv/bin/`. If you set up with `uv sync`, use `uv run` equivalents instead.
 
@@ -502,6 +564,8 @@ Before opening a PR:
 - [ ] No secrets or credentials in code
 - [ ] Bug fix: includes a regression test
 - [ ] New feature: includes tests for happy path and error cases
+
+**Note on smoke tests:** Smoke tests (`make smoke`) are for post-deployment verification against live instances. They are not part of the PR checklist and should not be run in CI — they require a running server with a real database.
 
 ## CI Requirements
 
