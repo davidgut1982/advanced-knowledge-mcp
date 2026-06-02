@@ -128,7 +128,7 @@ def test_provider_order_in_request_body(monkeypatch):
     response = _FakeResponse(_valid_payload('{"memories": []}'))
     with _patch_client(response, recorder):
         asyncio.run(ExtractionClient().extract("[user]: hi\n", {}))
-    assert recorder["body"]["provider"]["order"] == ["Groq", "Together", "Fireworks"]
+    assert recorder["body"]["provider"]["only"] == ["Cerebras"]
 
 
 def test_model_in_request_body(monkeypatch):
@@ -188,4 +188,4 @@ def test_openrouter_still_has_provider_routing(monkeypatch):
             ExtractionClient().extract("[user]: hi\n", {"auto_extract": {"provider": "openrouter"}})
         )
     assert recorder["url"] == "https://openrouter.ai/api/v1/chat/completions"
-    assert recorder["body"]["provider"]["order"] == ["Groq", "Together", "Fireworks"]
+    assert recorder["body"]["provider"]["only"] == ["Cerebras"]
