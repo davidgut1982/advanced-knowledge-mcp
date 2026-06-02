@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterator
 
 import pytest
 
@@ -73,7 +74,7 @@ def lore_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def session_client(lore_url: str) -> LoreClient:
+def session_client(lore_url: str) -> Iterator[LoreClient]:
     """Long-lived :class:`LoreClient` shared across the entire test session.
 
     Prefer the function-scoped ``client`` fixture for most tests.  Use this
@@ -89,7 +90,7 @@ def session_client(lore_url: str) -> LoreClient:
 
 
 @pytest.fixture
-def client(lore_url: str) -> LoreClient:
+def client(lore_url: str) -> Iterator[LoreClient]:
     """Fresh :class:`LoreClient` for each test function.
 
     Yields the client and closes it after the test completes (pass or fail).
@@ -99,7 +100,7 @@ def client(lore_url: str) -> LoreClient:
 
 
 @pytest.fixture
-def cleanup_topic(client: LoreClient) -> str:
+def cleanup_topic(client: LoreClient) -> Iterator[str]:
     """Provide a unique topic name and clean up all entries after the test.
 
     The topic is ``e2e-test-<8-hex-chars>``.  After the test (pass *or* fail)
@@ -134,7 +135,7 @@ def unique_id() -> str:
 
 
 @pytest.fixture
-def slow_client(lore_url: str) -> LoreClient:
+def slow_client(lore_url: str) -> Iterator[LoreClient]:
     """Fresh :class:`LoreClient` with extended timeout for long-running operations.
 
     Use this fixture for tests that call ``kb_backfill_embeddings`` or other
