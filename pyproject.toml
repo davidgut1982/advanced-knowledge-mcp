@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lore-knowledge-mcp"
-version = "0.8.6"
+version = "0.8.7"
 description = "Unified knowledge management MCP server with document intelligence and research workflows"
 readme = "README.md"
 license = {text = "MIT"}
