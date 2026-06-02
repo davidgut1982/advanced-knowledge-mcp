@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-06-02
+
+### Added
+- **`LORE_SEARCH_MODE_DEFAULT` env var** (PR #35): configurable default search mode for `kb_search`. Defaults to `"hybrid"` (was hardcoded `"fts"`). The response now includes `requested_mode` (caller's intent before any degradation) alongside `search_mode` (executed mode).
+- **e2e test suite for PRs #35 and #36** (PR #37): `tests/e2e/test_pr35_pr36.py` — 4 tests covering default-mode behaviour and `"summary"` mode rejection.
+
+### Fixed
+- **Removed `"summary"` from `search_mode` enum** (PR #36): passing `search_mode="summary"` now raises an MCP validation error immediately rather than being silently passed through. `"summary"` was never a valid execution path.
+- **Makefile e2e port corrected**: `e2e-staging`, `e2e-local`, and `soak-staging` targets now use port `5556`, matching the deployed `lore.service` config (was `5555`).
+
+### Documentation
+- **`CONTRIBUTING.md`**: comprehensive guide covering development setup, testing methodology (3 layers), snapshot test workflow, path to main, and full release process. Intended to be followed by both human contributors and AI assistants.
+
 ## [0.8.6] - 2026-05-28
 
 ### Added
