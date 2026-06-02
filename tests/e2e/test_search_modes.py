@@ -8,6 +8,7 @@ relevance — that is the job of ``test_regression.py``.
 from __future__ import annotations
 
 import time
+import uuid
 
 import pytest
 
@@ -223,13 +224,76 @@ class TestHybridMode:
 
 
 class TestCrossModeConsistency:
-    """Sanity checks comparing results across modes."""
+    """Sanity checks comparing results across modes.
+
+    These tests need a corpus entry that is reachable by *all* search modes,
+    not just whatever happens to already live on the server. Earlier this class
+    relied on pre-seeded data that does not exist on a clean staging instance,
+    so the suite failed there. ``crossmode_corpus`` makes the class fully
+    self-contained: it seeds the minimum entry it needs and deletes it on
+    teardown, using the same LoreClient pattern as the function-scoped
+    ``client``/``cleanup_topic`` fixtures in conftest.py.
+    """
+
+    @pytest.fixture(scope="class")
+    def crossmode_corpus(self, lore_url: str) -> tuple[LoreClient, str]:
+        """Seed one sentinel entry for the whole class, then tear it down.
+
+        Why: the cross-mode tests assert that a known entry is reachable from
+        FTS and hybrid alike; they need a guaranteed corpus entry rather than
+        depending on data that may not exist on a fresh staging server.
+        What: creates a unique-topic sentinel entry, waits for the FTS index to
+        settle, yields ``(client, sentinel_token)``, and deletes the entry (and
+        any stragglers under its topic) afterwards.
+        Test: run ``TestCrossModeConsistency`` against a clean staging instance
+        (``LORE_E2E_URL=…``); both tests pass and no ``e2e-crossmode-*`` topic
+        survives the run.
+
+        Class-scoped (not the function-scoped ``client``/``cleanup_topic``
+        fixtures) so the single seed + 2 s FTS settle cost is paid once for the
+        whole class rather than per test.
+        """
+        topic = f"e2e-crossmode-{uuid.uuid4().hex[:8]}"
+        sentinel = f"xqz99crossmode{uuid.uuid4().hex[:8]}"
+        with LoreClient(lore_url, timeout=30.0) as client:
+            added = client.kb_add(
+                topic=topic,
+                title=f"Cross-mode consistency sentinel {sentinel}",
+                content=(
+                    f"This entry contains the sentinel token {sentinel}. "
+                    "It exists so the cross-mode consistency tests have a "
+                    "known-good entry reachable from every search mode."
+                ),
+            )
+            seeded_id = added.get("kb_id")
+            # Allow the SQLite FTS write-ahead log to flush before querying, the
+            # same 2 s settle the function-scoped seeded_client fixture uses.
+            time.sleep(2)
+            try:
+                yield client, sentinel
+            finally:
+                # Teardown: delete the seeded entry plus any stragglers under
+                # the unique topic. Best-effort — never fail teardown.
+                ids: set[str] = {seeded_id} if seeded_id else set()
+                try:
+                    listing = client.kb_list(topic=topic)
+                    for entry in listing.get("entries") or listing.get("results") or []:
+                        entry_id = entry.get("kb_id")
+                        if entry_id:
+                            ids.add(entry_id)
+                except Exception as exc:  # noqa: BLE001 - teardown is best-effort
+                    print(f"[crossmode cleanup] list failed for topic {topic!r}: {exc}")
+                for entry_id in ids:
+                    try:
+                        client.kb_delete(entry_id, confirm=True)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[crossmode cleanup] failed to delete {entry_id}: {exc}")
 
     def test_all_modes_return_same_entry_ids_for_exact_fts_token(
-        self, seeded_client: tuple[LoreClient, str]
+        self, crossmode_corpus: tuple[LoreClient, str]
     ) -> None:
         """The seeded entry ID should appear in results from all three modes."""
-        client, sentinel = seeded_client
+        client, sentinel = crossmode_corpus
 
         fts_result = client.kb_search(sentinel, search_mode="fts")
         # Use a wider window for hybrid so the FTS top-1 result is reachable in
@@ -249,9 +313,11 @@ class TestCrossModeConsistency:
             f"Hybrid IDs: {sorted(hybrid_ids)}"
         )
 
-    def test_default_mode_returns_results(self, seeded_client: tuple[LoreClient, str]) -> None:
+    def test_default_mode_returns_results(
+        self, crossmode_corpus: tuple[LoreClient, str]
+    ) -> None:
         """kb_search without an explicit search_mode should also return results."""
-        client, sentinel = seeded_client
+        client, sentinel = crossmode_corpus
         result = client.kb_search(sentinel)
         _assert_search_shape(result, "default")
         results = _get_results(result)
