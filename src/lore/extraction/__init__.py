@@ -117,6 +117,11 @@ async def extract_and_store(
     Returns a summary ``{"extracted", "inserted", "merged", "skipped"}``.
     Returns an all-zero summary when extraction is disabled, the session is
     below ``min_turns``, or the API key is missing.
+
+    In ``dry_run`` mode the full pipeline runs (LLM extraction + dedup) but no
+    KB writes are issued. The would-be decision for each accepted candidate is
+    collected under ``summary["candidates"]`` so operators can inspect exactly
+    what *would* have been written before flipping live writes on.
     """
     summary = _empty_summary()
 
@@ -156,6 +161,7 @@ async def extract_and_store(
     result = await client.extract(conversation_text, config)
 
     summary["extracted"] = len(result.memories)
+    dry_run_candidates: list[dict] = []
 
     for candidate in result.memories:
         if candidate.confidence < _effective_threshold(candidate, config) or not candidate.durable:
@@ -170,16 +176,27 @@ async def extract_and_store(
             logger.debug("dedup raised, treating as new entry: %s", exc)
             merge, existing_id = False, None
 
+        # dry_run is checked AFTER dedup (so the full pipeline really ran) but
+        # strictly BEFORE any kb_add/kb_update — no write of any kind happens in
+        # dry-run mode. The would-be decision is recorded for inspection.
         if dry_run:
-            # Full pipeline ran (LLM + dedup); we only skip the KB writes so
-            # operators can tune thresholds against real candidate logs.
+            action = "merge" if (merge and existing_id) else "insert"
             logger.info(
                 "[dry-run] would %s: [%s] %s (confidence=%.2f, subject=%s)",
-                "merge" if merge else "insert",
+                action,
                 candidate.type.value,
                 candidate.content[:80],
                 candidate.confidence,
                 candidate.subject,
+            )
+            dry_run_candidates.append(
+                {
+                    "action": action,
+                    "type": candidate.type.value,
+                    "content": candidate.content,
+                    "confidence": candidate.confidence,
+                    "existing_id": existing_id,
+                }
             )
             summary["skipped"] += 1
             continue
@@ -207,6 +224,7 @@ async def extract_and_store(
 
     if dry_run:
         summary["dry_run"] = True
+        summary["candidates"] = dry_run_candidates
 
     logger.info(
         "Auto-extraction summary: extracted=%d inserted=%d merged=%d skipped=%d dry_run=%s",
