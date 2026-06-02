@@ -4,18 +4,31 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-## [0.8.7] - 2026-06-02
+## [0.9.0] - 2026-06-02
 
 ### Added
-- **`LORE_SEARCH_MODE_DEFAULT` env var** (PR #35): configurable default search mode for `kb_search`. Defaults to `"hybrid"` (was hardcoded `"fts"`). The response now includes `requested_mode` (caller's intent before any degradation) alongside `search_mode` (executed mode).
-- **e2e test suite for PRs #35 and #36** (PR #37): `tests/e2e/test_pr35_pr36.py` — 4 tests covering default-mode behaviour and `"summary"` mode rejection.
+- **Automatic memory extraction** (PR #33): opt-in session-end hook that sends conversation turns to a fast LLM (OpenRouter or Cerebras) to extract durable facts, preferences, goals, events, and system facts, then deduplicates against the existing KB before writing. New `src/lore/extraction/` module (`schema.py`, `prompts.py`, `client.py`, `dedup.py`, `__init__.py`). All auto-extracted entries tagged `source:auto-extracted`. Configurable via `plugins/lore/plugin.yaml` (`auto_extract.enabled`, `provider`, `model`, thresholds). Two providers: OpenRouter (default) or Cerebras direct API. See `docs/auto-extraction-setup.md`.
+- **`kb_get_batch`** (issues #25–#28): batch content retrieval for multiple KB IDs in a single MCP call. Validates `minItems`/`maxItems`, uses `ErrorCodes` class for all error paths.
+- **`LORE_SEARCH_MODE_DEFAULT` env var** (PR #35): configurable default search mode for `kb_search`. Defaults to `"hybrid"`. Response includes `requested_mode` (caller's intent before any degradation) alongside `search_mode` (executed mode).
+- **GIN index for English FTS** (PR #30): combined title+content expression index for faster full-text search on PostgreSQL; removes unnecessary `btree_gin` extension dependency.
+- **Glama MCP registry**: `glama.json` added — Lore is now listed on the Glama MCP registry.
+- **`CONTRIBUTING.md`**: comprehensive contributor guide covering development setup, testing methodology (3 layers), snapshot test workflow, path to main, and full release process.
+- **e2e tests for PRs #35 and #36** (PR #37): `tests/e2e/test_pr35_pr36.py` — 4 tests locking in default search mode behaviour and `"summary"` mode rejection.
+- **e2e extraction eval harness**: 10 scenario fixtures validating auto-extraction end-to-end.
 
 ### Fixed
-- **Removed `"summary"` from `search_mode` enum** (PR #36): passing `search_mode="summary"` now raises an MCP validation error immediately rather than being silently passed through. `"summary"` was never a valid execution path.
-- **Makefile e2e port corrected**: `e2e-staging`, `e2e-local`, and `soak-staging` targets now use port `5556`, matching the deployed `lore.service` config (was `5555`).
+- **`"summary"` removed from `search_mode` enum** (PR #36): passing `search_mode="summary"` now raises an MCP validation error immediately rather than being silently passed through.
+- **`multi_search` fallback** (issue #24): `handle_kb_search` now calls `default_search_mode()` which defaults to `"hybrid"`, so hybrid search activates when FTS yields zero results instead of returning empty.
+- **Plugin async safety** (PR #32): `gather(return_exceptions=True)`, `kb_id` dict re-key, `isinstance` py3.9 compatibility.
+- **Makefile e2e port**: `e2e-staging`, `e2e-local`, and `soak-staging` targets corrected to port `5556` (matches deployed `lore.service` config).
+
+### Testing
+- Integration test bootstrap validation (PR #31): fresh-env bootstrap, FTS index, `kb_get_batch`, hybrid query plan assertions.
+- 996 unit tests + 45 Postgres integration tests passing.
 
 ### Documentation
-- **`CONTRIBUTING.md`**: comprehensive guide covering development setup, testing methodology (3 layers), snapshot test workflow, path to main, and full release process. Intended to be followed by both human contributors and AI assistants.
+- `docs/auto-extraction-setup.md`: complete setup guide for both providers — API key setup, config tuning table, inspecting and removing auto-extracted entries.
+- doc-summary strategy documented (issue #19): Lore is intentionally LLM-free; summaries are the caller/scheduler's responsibility.
 
 ## [0.8.6] - 2026-05-28
 
