@@ -42,7 +42,9 @@ Ingest a markdown file into KB with change detection.
 **Strategies:**
 - `full` - One KB entry for entire document (best for short docs <3000 tokens)
 - `chunked` - Split by headers and/or token count (default, best for long docs)
-- `summary` - GPT-generated summary (not yet implemented)
+
+> **Note (Issue #19):** `summary` is intentionally not a supported strategy. See
+> [Why summary strategy is unsupported](#why-summary-strategy-is-unsupported) below.
 
 ### 2. `kb_ingest_dir` - Batch Ingest Directory
 
@@ -332,12 +334,62 @@ Tell Claude: "Check sync status for /tmp directory"
 Tell Claude: "Show me the source document for KB entry kb_xxxxx"
 ```
 
+## Why summary Strategy is Unsupported
+
+**Issue #19** — `strategy="summary"` is intentionally absent from Lore.
+
+Lore is **LLM-free by design**. It stores and retrieves knowledge; it does not
+generate, rephrase, or summarize content. Accepting a `summary` strategy would
+require embedding an LLM call inside the ingestion pipeline, which contradicts
+this core design constraint and adds a heavyweight dependency.
+
+### Correct pattern for summary ingestion
+
+Generate the summary yourself (in the caller, using whichever LLM you prefer),
+then store it via the standard ingestion path:
+
+```python
+# 1. Generate summary with your LLM (outside Lore)
+summary_text = my_llm.summarize(original_doc_content)
+
+# 2. Store the summary as a full-strategy KB entry
+kb_add(
+    topic="my_topic",
+    title="Summary: Original Doc Title",
+    content=summary_text,
+    tags=["summary", "auto-generated"],
+    source_type="llm_summary",
+)
+
+# — or — ingest a pre-written summary file
+kb_ingest_doc(
+    doc_path="/path/to/summary.md",
+    strategy="full",   # short summary → single entry
+)
+```
+
+### What happens if you pass strategy="summary"
+
+The server returns an `invalid_input` error pointing you to `full`/`chunked`:
+
+```json
+{
+  "ok": false,
+  "error": "invalid_input",
+  "message": "strategy='summary' is not supported (Lore is LLM-free). Use 'full' or 'chunked' and pre-generate summaries in the caller."
+}
+```
+
+The `summary` value has been removed from the `strategy` enum in both the JSON
+Schema (`_TOOL_DEFINITIONS`) and the FastMCP type stubs (`Literal["full",
+"chunked"]`), so well-behaved clients will not offer it as an option.
+
 ## Benefits
 
 - **Single Source of Truth**: Docs remain in version control
 - **Automatic Sync Detection**: SHA-256 hashing prevents redundant processing
 - **Bidirectional Linking**: Navigate from KB → source or source → KB
-- **Flexible Strategies**: Choose ingestion strategy per document
+- **Flexible Strategies**: Choose ingestion strategy per document (`full` or `chunked`)
 - **Parallel Processing**: `kb_ingest_dir` processes multiple docs concurrently
 - **Graceful Error Handling**: One doc failure doesn't stop batch processing
 
