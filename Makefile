@@ -22,14 +22,14 @@ test:
 # ---------------------------------------------------------------------------
 
 e2e-staging:
-	LORE_E2E_URL=http://lore-staging:5555 venv/bin/pytest tests/e2e/ -v
+	LORE_E2E_URL=http://lore-staging:5556 venv/bin/pytest tests/e2e/ -v
 
 e2e-local:
-	LORE_E2E_URL=http://localhost:5555 venv/bin/pytest tests/e2e/ -v
+	LORE_E2E_URL=http://localhost:5556 venv/bin/pytest tests/e2e/ -v
 
 # ---------------------------------------------------------------------------
 # Soak test (long-running; use tmux or nohup)
 # ---------------------------------------------------------------------------
 
 soak-staging:
-	LORE_E2E_URL=http://lore-staging:5555 venv/bin/python3 -m tests.e2e.soak_runner --duration 24h
+	LORE_E2E_URL=http://lore-staging:5556 venv/bin/python3 -m tests.e2e.soak_runner --duration 24h
