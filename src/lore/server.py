@@ -699,9 +699,9 @@ _TOOL_DEFINITIONS = [
                 "doc_path": {"type": "string", "description": "Absolute path to markdown file"},
                 "strategy": {
                     "type": "string",
-                    "enum": ["full", "chunked", "summary"],
+                    "enum": ["full", "chunked"],
                     "default": "chunked",
-                    "description": "Ingestion strategy: full (one entry) or chunked (by sections). 'summary' is not provided by Lore (LLM-free); generate summaries in the caller — see issue #19.",
+                    "description": "Ingestion strategy: full (one entry per doc) or chunked (split by headers/token count). Lore is LLM-free; summary generation must be done by the caller before ingestion — see issue #19 and docs/DOCUMENT_INGESTION_GUIDE.md.",
                 },
                 "chunk_size": {
                     "type": "integer",
@@ -745,7 +745,7 @@ _TOOL_DEFINITIONS = [
                 },
                 "strategy": {
                     "type": "string",
-                    "enum": ["full", "chunked", "summary"],
+                    "enum": ["full", "chunked"],
                     "default": "chunked",
                 },
                 "recursive": {
@@ -1924,6 +1924,9 @@ def handle_kb_search(
         )
 
         # Determine the requested mode.
+        # Issue #24: fall back to default_search_mode() (honours the
+        # LORE_SEARCH_MODE_DEFAULT env var, defaults to "hybrid") rather than
+        # hard-coding "fts" when no mode is explicitly requested.
         if search_mode in {"fts", "semantic", "hybrid"}:
             requested_mode: str = search_mode
         elif semantic:
@@ -1931,7 +1934,7 @@ def handle_kb_search(
         elif hybrid:
             requested_mode = "hybrid"
         else:
-            requested_mode = "fts"
+            requested_mode = _search.default_search_mode()
 
         # Bound top_k defensively (schema already constrains 1..200, but the
         # handler is also invoked from internal callers).
